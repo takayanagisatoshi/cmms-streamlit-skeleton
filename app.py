@@ -390,34 +390,44 @@ with tab2:
     bad_days  = qual_sel.loc[qual_sel["sev"]>=2, "date"].dt.normalize().dropna().unique() if shade_x else []
     warn_days = qual_sel.loc[qual_sel["sev"]==1, "date"].dt.normalize().dropna().unique() if shade_tri else []
     
-    # --- 数値：単位ごとに左右軸を分ける（最大2軸） ---
-    num["unit"] = num["unit"].astype(str).replace({"nan":"値","None":"値"})
-    units_all = num["unit"].dropna().unique().tolist()
-    if len(units_all) <= 2:
-        units_pick = units_all
-    else:
-        units_pick = st.multiselect("表示する数値の単位（最大2つ）", units_all, default=units_all[:2], max_selections=2)
-        if not units_pick: units_pick = units_all[:1]
+    # --- 右軸に出すシリーズを選ぶ（単位欠損でもOK: 名前で推定） ---
+    # シリーズごとの unit を1つ拾う（無ければ空文字）
+    series = (num.groupby("target_name")
+                .agg(unit=("unit", lambda s: next((u for u in s if pd.notna(u) and str(u) not in ["nan","None",""]), "")),
+                     med=("value_num","median"))
+                .reset_index())
     
-    from plotly.subplots import make_subplots
-    import plotly.graph_objects as go
+    # 初期候補：名称に「圧/圧力/差圧/MPa/kPa/電圧/V」などが含まれるものを右軸に
+    KW_RIGHT = ("圧力", "差圧", "圧", "MPa", "kPa", "電圧", "V")
+    suggest_right = [row.target_name for row in series.itertuples(index=False)
+                     if any(k in row.target_name for k in KW_RIGHT)]
+    right_targets = st.multiselect(
+        "右軸にする項目（圧力・電圧など）", series["target_name"].tolist(), default=suggest_right
+    )
+    
+    # 図（左右軸）
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    unit_axis = {}
-    if len(units_pick) >= 1: unit_axis[units_pick[0]] = "y"   # 左
-    if len(units_pick) >= 2: unit_axis[units_pick[1]] = "y2"  # 右
-    
-    # 数値トレース
-    for (tname, unit), g in num[num["unit"].isin(units_pick)].groupby(["target_name","unit"]):
-        use_y2 = (unit_axis.get(unit) == "y2")
+    # 数値トレース（右軸=選択された項目）
+    for tname, g in num.groupby("target_name"):
+        unit_label = series.loc[series["target_name"] == tname, "unit"].iloc[0]
         fig.add_trace(
             go.Scatter(
-                x=g["date"], y=g["value_num"], mode="lines+markers", name=f"{tname}",
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y} "+(unit or "")
+                x=g["date"], y=g["value_num"], mode="lines+markers", name=tname,
+                hovertemplate="%{x|%Y-%m-%d}<br>%{y} " + (unit_label or "")
             ),
-            secondary_y=use_y2
+            secondary_y=(tname in right_targets)
         )
     
+    # 軸タイトル（左/右で使われている単位をまとめる。無いときはラベルだけ）
+    left_units  = series.loc[~series["target_name"].isin(right_targets), "unit"].unique().tolist()
+    right_units = series.loc[ series["target_name"].isin(right_targets), "unit"].unique().tolist()
+    left_label  = " / ".join([u for u in left_units  if u]) or "左軸"
+    right_label = " / ".join([u for u in right_units if u]) or "右軸"
+    
+    fig.update_yaxes(title_text=left_label,  secondary_y=False)
+    fig.update_yaxes(title_text=right_label, secondary_y=True)
+
     # 背景シェード（△=黄, ×=赤）
     for d in warn_days:
         fig.add_vrect(x0=d, x1=d, fillcolor="#FFD166", opacity=shade_alpha, line_width=0)
