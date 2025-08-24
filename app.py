@@ -113,28 +113,45 @@ def import_issues(df: pd.DataFrame):
     st.success(f"不具合取込: {len(df)} 行")
 
 # ---- 取込：点検結果（横持ち→縦melt） -----------------------------------
+# 先頭付近で必要なら追加
+import re
+
 def import_results_wide(df: pd.DataFrame):
+    df = df.rename(columns=lambda c: str(c).strip())  # 前後空白削除
     df = df.rename(columns=str.lower)
+
     fixed = ["schedule_id","device_id","target_id","target_name","target_type_id","unit"]
-    date_cols = [c for c in df.columns if c not in fixed]
+
+    # ✅ ヘッダーが日付形式のものだけを抽出（YYYY-MM-DD / YYYY/MM/DD）
+    date_cols = [c for c in df.columns
+                 if re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}", c)
+                 or re.fullmatch(r"\d{4}/\d{2}/\d{2}", c)]
+
     rows = []
     for _, r in df.iterrows():
         for dc in date_cols:
-            val = r[dc]
-            if pd.isna(val) or str(val)=="":
+            val = r.get(dc)
+            if pd.isna(val) or str(val) == "":
                 continue
+            # "2025/08/25" → "2025-08-25"
+            d = pd.to_datetime(dc.replace("/", "-"), errors="coerce")
+            if pd.isna(d):
+                continue
+            num = pd.to_numeric(val, errors="coerce")
             rows.append({
                 "schedule_id": r["schedule_id"],
-                "date": pd.to_datetime(dc).date(),
+                "date": d.date(),
                 "target_id": r["target_id"],
-                "value_num": pd.to_numeric(val, errors="coerce"),
-                "value_text": None if pd.to_numeric(val, errors="coerce")==pd.to_numeric(val, errors="coerce") else str(val),
+                "value_num": None if pd.isna(num) else float(num),
+                "value_text": None if not pd.isna(num) else str(val),
                 "value_bool": None,
                 "judged": None
             })
+
     if rows:
         upsert_df("results", pd.DataFrame(rows), ["schedule_id","date","target_id"])
-    st.success(f"点検結果取込: {len(df)} 行（空値は除外）")
+    st.success(f"点検結果取込: {len(df)} 行（{len(date_cols)}本の日付列を処理）")
+
 
 # ---- KPI 再計算（超簡易） ------------------------------------------------
 def recalc_daily_kpis():
