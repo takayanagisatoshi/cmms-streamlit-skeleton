@@ -318,30 +318,111 @@ with tab2:  # 設備
         c2.metric("データ点数", int(df.shape[0]))
         c3.metric("異常件数", int(abnormal_mask.sum()))
 
-        # --- 数値系：ラインチャート + 要約表（最新/最小/最大/平均） ---
-        num = df.dropna(subset=["value_num"]).copy()
-        if not num.empty:
-            # 時系列グラフ
-            st.subheader("数値ターゲット（推移）")
-            st.plotly_chart(
-                px.line(num, x="date", y="value_num", color="target_name", markers=True),
-                use_container_width=True
-            )
-            # 要約表
-            latest = num.sort_values("date").groupby("target_name").tail(1).set_index("target_name")[["value_num","unit"]]
-            stats = num.groupby("target_name")["value_num"].agg(最小="min", 最大="max", 平均="mean")
-            summary = latest.join(stats, how="left").rename(columns={"value_num":"最新値"})
-            st.markdown("**数値ターゲットの要約**")
-            st.dataframe(summary.reset_index(), use_container_width=True)
+       from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import numpy as np
 
-        # --- 五感/選択系：○/△/×の表（日付×項目） ---
-        qual = df[df["value_num"].isna()].copy()
-        if not qual.empty:
-            st.subheader("五感/選択ターゲット（○/△/×）")
-            pivot = qual.pivot_table(
-                index="date", columns="target_name", values="value_text", aggfunc="first"
-            )
-            st.dataframe(pivot, use_container_width=True)
+# 期間選択後の df を取得するクエリはそのまま
+q = """
+  SELECT r.date, r.target_id, r.value_num, r.value_text,
+         t.name AS target_name, t.unit, t.lower, t.upper
+  FROM results r
+  JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
+  WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ?
+  ORDER BY r.date
+"""
+df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
+if df.empty:
+    st.warning("期間内のデータがありません。"); st.stop()
+
+# --- 同一時間軸：上=数値ライン、下=五感ヒートマップ ---
+df["date"] = pd.to_datetime(df["date"])
+
+# 異常のブール（数値の閾値逸脱 or 五感×/NG）
+abnormal_mask = (
+    (df["value_num"].notna() & (
+        (df["lower"].notna() & (df["value_num"] < df["lower"])) |
+        (df["upper"].notna() & (df["value_num"] > df["upper"]))
+    )) |
+    (df["value_num"].isna() & df["value_text"].isin(["×","NG"]))
+)
+
+c1, c2, c3 = st.columns(3)
+c1.metric("対象項目", int(df["target_id"].nunique()))
+c2.metric("データ点数", int(df.shape[0]))
+c3.metric("異常件数", int(abnormal_mask.sum()))
+
+# 五感のマッピング（必要なら語彙を足してください）
+label_to_score = {
+    "○": 0, "OK": 0, "良": 0,
+    "△": 1, "要確認": 1, "注意": 1,
+    "×": 2, "NG": 2, "異常": 2
+}
+
+num = df.dropna(subset=["value_num"]).copy()
+qual = df[df["value_num"].isna()].copy()
+qual["score"] = qual["value_text"].map(label_to_score).fillna(np.nan)
+
+# ヒートマップの行=ターゲット、列=日付
+if not qual.empty:
+    heat = (qual
+            .pivot_table(index="target_name", columns="date", values="score", aggfunc="max")
+            .sort_index())
+else:
+    # 五感が無いときも落ちないように空の枠を作る
+    heat = pd.DataFrame(index=[], columns=[])
+
+fig = make_subplots(
+    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.02,
+    row_heights=[0.62, 0.38],
+    subplot_titles=("数値ターゲット（推移）", "五感/選択ターゲット（0=OK, 1=注意, 2=異常）")
+)
+
+# 上段：数値ライン
+for name, g in num.groupby("target_name"):
+    fig.add_trace(
+        go.Scatter(
+            x=g["date"], y=g["value_num"], mode="lines+markers",
+            name=str(name), hovertemplate="%{x|%Y-%m-%d}<br>%{y} "+str(g["unit"].iloc[0] if "unit" in g else "")
+        ),
+        row=1, col=1
+    )
+
+# 五感で“異常(×/NG)”の日に縦帯を入れて関連を見やすく
+if not qual.empty:
+    bad_days = qual[qual["score"] >= 2]["date"].dropna().dt.normalize().unique()
+    for d in bad_days:
+        fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="red", opacity=0.08, line_width=0)
+
+# 下段：五感ヒートマップ（OK/注意/異常）
+if not heat.empty:
+    # 0,1,2 の色分け（緑/黄/赤）※必要なら色は調整してください
+    colorscale = [
+        [0.0, "#3CB371"],   # 0 OK
+        [0.5, "#FFD166"],   # 1 注意
+        [1.0, "#EF476F"],   # 2 異常
+    ]
+    fig.add_trace(
+        go.Heatmap(
+            z=heat.values, x=heat.columns, y=heat.index,
+            zmin=0, zmax=2, colorscale=colorscale, colorbar=dict(title=""),
+            hovertemplate="%{y}<br>%{x|%Y-%m-%d}<br>状態=%{z}<extra></extra>"
+        ),
+        row=2, col=1
+    )
+
+fig.update_layout(height=700, margin=dict(l=10,r=10,t=40,b=10))
+fig.update_xaxes(matches="x", row=1, col=1)
+st.plotly_chart(fig, use_container_width=True)
+
+# 参考：従来の五感テーブルも残したい場合は表示
+if not qual.empty:
+    st.markdown("**五感/選択ターゲット（表）**")
+    st.dataframe(
+        qual.pivot_table(index="date", columns="target_name", values="value_text", aggfunc="first"),
+        use_container_width=True
+    )
+
 
     # --- この設備の不具合 ---
     st.subheader("この設備に紐づく不具合")
