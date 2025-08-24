@@ -590,17 +590,13 @@ CMMS_LINKS = {
     "年間業務計画":   f"{CMMS_BASE}/annual-plan",
 }
 
-def open_external(url: str):
-    # 別タブで開く（アプリ本体は遷移しない）
-    components.html(f"<script>window.open('{url}','_blank');</script>", height=0)
-
 def render_sidebar_and_route():
     with st.sidebar:
         st.markdown("### 管理ロイド")
         # 外部リンク群
         for label in ["業務チケット","不具合管理","モニタリング","報告書","写真報告","台帳管理","年間業務計画"]:
-            if st.button(f"・{label}", use_container_width=True, key=f"btn_{label}"):
-                open_external(CMMS_LINKS[label])
+    st.link_button(f"・{label}", CMMS_LINKS[label], use_container_width=True, type="secondary")
+
         st.divider()
         # 年間業務計画の直下に β版（アプリ内ルート）
         go_analysis = st.button("・分析・サマリー（β版）", type="primary", use_container_width=True)
