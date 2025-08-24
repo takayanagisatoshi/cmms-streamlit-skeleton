@@ -366,38 +366,38 @@ with tab2:
 
     # 同一時間軸の複合図
     # ---- 数値ライン + ×/△ 背景シェード（同一時間軸、単位で左右軸） ----
-df["date"] = pd.to_datetime(df["date"])
+df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
 # 分割
 num  = df.dropna(subset=["value_num"]).copy()
 qual = df[df["value_num"].isna()].copy()
 
-# 五感スコア（0=OK, 1=△, 2=×）
-sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "×":2, "NG":2, "異常":2}
-qual["sev"] = qual["value_text"].map(sev_map).astype("float")
+# 五感スコア（0=OK, 1=△, 2=×） ※列名は sev に統一
+sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "▲":1, "×":2, "NG":2, "異常":2}
+qual["sev"]  = qual["value_text"].map(sev_map).astype("float")
+qual["date"] = pd.to_datetime(qual["date"], errors="coerce")
 
 # --- 背景シェードの対象を選ぶ UI ---
 qual_targets_all = sorted(qual["target_name"].dropna().unique().tolist())
-default_sel = sorted(qual.loc[qual["sev"]==2, "target_name"].unique().tolist()) or qual_targets_all
+default_sel = sorted(qual.loc[qual["sev"]==2, "target_name"].dropna().unique().tolist()) or qual_targets_all
 sel_targets = st.multiselect("背景色の対象（五感項目）", qual_targets_all, default=default_sel)
-shade_x  = st.checkbox("×の発生日で背景色", value=True)
+shade_x   = st.checkbox("×の発生日で背景色", value=True)
 shade_tri = st.checkbox("△の発生日も背景色に含める", value=False)
 shade_alpha = st.slider("背景の濃さ", 0.05, 0.4, 0.12, 0.01)
 
 qual_sel = qual[qual["target_name"].isin(sel_targets)] if len(sel_targets) else qual.iloc[0:0]
-days_bad  = pd.to_datetime(qual_sel.loc[qual_sel["sev"]==2, "date"]).dt.normalize().unique() if shade_x else []
-days_warn = pd.to_datetime(qual_sel.loc[qual_sel["sev"]==1, "date"]).dt.normalize().unique() if shade_tri else []
+bad_days  = qual_sel.loc[qual_sel["sev"]>=2, "date"].dt.normalize().dropna().unique() if shade_x else []
+warn_days = qual_sel.loc[qual_sel["sev"]==1, "date"].dt.normalize().dropna().unique() if shade_tri else []
 
-# --- 数値：単位ごとに左右軸を分ける（最大2軸。3種類以上はユーザが選択） ---
+# --- 数値：単位ごとに左右軸を分ける（最大2軸） ---
 num["unit"] = num["unit"].astype(str).replace({"nan":"値","None":"値"})
-units_all = [u for u in num["unit"].unique().tolist()]
+units_all = num["unit"].dropna().unique().tolist()
 if len(units_all) <= 2:
     units_pick = units_all
 else:
     units_pick = st.multiselect("表示する数値の単位（最大2つ）", units_all, default=units_all[:2], max_selections=2)
     if not units_pick: units_pick = units_all[:1]
 
-# 図：左右軸
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -418,17 +418,17 @@ for (tname, unit), g in num[num["unit"].isin(units_pick)].groupby(["target_name"
     )
 
 # 背景シェード（△=黄, ×=赤）
-for d in days_warn:
+for d in warn_days:
     fig.add_vrect(x0=d, x1=d, fillcolor="#FFD166", opacity=shade_alpha, line_width=0)
-for d in days_bad:
+for d in bad_days:
     fig.add_vrect(x0=d, x1=d, fillcolor="#EF476F", opacity=min(shade_alpha+0.05, 0.5), line_width=0)
 
 # 上部マーカー（記号で日付を示す）
 if st.checkbox("×/△ を上部に記号表示", value=True):
-    for d in days_bad:
+    for d in bad_days:
         fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="×", showarrow=False,
                            font=dict(color="#EF476F", size=14))
-    for d in days_warn:
+    for d in warn_days:
         fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="▲", showarrow=False,
                            font=dict(color="#FFD166", size=12))
 
@@ -436,26 +436,27 @@ if st.checkbox("×/△ を上部に記号表示", value=True):
 left_label  = units_pick[0] if len(units_pick)>=1 else ""
 right_label = units_pick[1] if len(units_pick)>=2 else ""
 fig.update_yaxes(title_text=left_label, secondary_y=False)
-if right_label: fig.update_yaxes(title_text=right_label, secondary_y=True)
+if right_label:
+    fig.update_yaxes(title_text=right_label, secondary_y=True)
 
-fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10),
+                  legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
 st.plotly_chart(fig, use_container_width=True)
 
-# --- 下：イベント（五感）一覧（対象をチェックで切替） ---
+# --- 下：イベント（五感）一覧 ---
 if not qual.empty:
-    show = qual.copy()
-    if len(sel_targets): show = show[show["target_name"].isin(sel_targets)]
-    # 重要度フィルタ
+    show = qual_sel.copy() if len(sel_targets) else qual.copy()
     col1, col2 = st.columns(2)
     f_bad = col1.checkbox("×のみ表示", value=False)
     f_tri = col2.checkbox("△のみ表示", value=False)
     if f_bad: show = show[show["sev"]==2]
     if f_tri: show = show[show["sev"]==1]
     st.dataframe(
-        show.sort_values(["date","target_name"])[["date","target_name","value_text"]].rename(
-            columns={"date":"日付","target_name":"項目","value_text":"判定"}),
+        show.sort_values(["date","target_name"])[["date","target_name","value_text"]]
+            .rename(columns={"date":"日付","target_name":"項目","value_text":"判定"}),
         use_container_width=True
     )
+
 
     # 上段：数値ライン
     for name, g in num.groupby("target_name"):
