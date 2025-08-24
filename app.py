@@ -593,13 +593,16 @@ CMMS_LINKS = {
 def render_sidebar_and_route():
     with st.sidebar:
         st.markdown("### 管理ロイド")
-        # 外部リンク群
+
+        # 外部リンク（←ここを for の中で1段インデント）
         for label in ["業務チケット","不具合管理","モニタリング","報告書","写真報告","台帳管理","年間業務計画"]:
-    st.link_button(f"・{label}", CMMS_LINKS[label], use_container_width=True, type="secondary")
+            st.link_button(f"・{label}", CMMS_LINKS[label], use_container_width=True, type="secondary")
 
         st.divider()
+
         # 年間業務計画の直下に β版（アプリ内ルート）
-        go_analysis = st.button("・分析・サマリー（β版）", type="primary", use_container_width=True)
+        go_analysis = st.button("・分析・サマリー（β版）", type="primary",
+                                use_container_width=True, key="btn_analysis")
 
     # ルーティング（押したら保持）
     if go_analysis or st.session_state.get("route") == "analysis":
@@ -608,6 +611,7 @@ def render_sidebar_and_route():
     else:
         st.title("管理ロイド シェル")
         st.info("左メニューから各画面へ。『分析・サマリー（β版）』のみ本アプリ内で動作します。")
+
 
 # ---- 起動 ----
 render_sidebar_and_route()
