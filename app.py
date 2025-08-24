@@ -366,75 +366,60 @@ with tab2:
 
     # 同一時間軸の複合図
    
-    # ---- 数値ライン + ×/△ 背景シェード（同一時間軸、単位で左右軸） ----
+  # ---- 数値ライン + ×/△ 背景シェード（同一時間軸・右軸をUIで選択） ----
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    
-    # 分割
     num  = df.dropna(subset=["value_num"]).copy()
     qual = df[df["value_num"].isna()].copy()
     
-    # 五感スコア（0=OK, 1=△, 2=×） ※列名は sev に統一
+    # 五感→sev(0=OK,1=△,2=×)
     sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "▲":1, "×":2, "NG":2, "異常":2}
-    qual["sev"]  = qual["value_text"].map(sev_map).astype("float")
+    if "sev" not in qual.columns:
+        qual["sev"] = qual["value_text"].map(sev_map).astype("float")
     qual["date"] = pd.to_datetime(qual["date"], errors="coerce")
     
-    # --- 背景シェードの対象を選ぶ UI ---
+    # 背景シェード対象の選択
     qual_targets_all = sorted(qual["target_name"].dropna().unique().tolist())
     default_sel = sorted(qual.loc[qual["sev"]==2, "target_name"].dropna().unique().tolist()) or qual_targets_all
     sel_targets = st.multiselect("背景色の対象（五感項目）", qual_targets_all, default=default_sel)
-    shade_x   = st.checkbox("×の発生日で背景色", value=True)
-    shade_tri = st.checkbox("△の発生日も背景色に含める", value=False)
+    shade_x     = st.checkbox("×の発生日で背景色", value=True)
+    shade_tri   = st.checkbox("△の発生日も背景色に含める", value=False)
     shade_alpha = st.slider("背景の濃さ", 0.05, 0.4, 0.12, 0.01)
     
-    qual_sel = qual[qual["target_name"].isin(sel_targets)] if len(sel_targets) else qual.iloc[0:0]
-    bad_days  = qual_sel.loc[qual_sel["sev"]>=2, "date"].dt.normalize().dropna().unique() if shade_x else []
-    warn_days = qual_sel.loc[qual_sel["sev"]==1, "date"].dt.normalize().dropna().unique() if shade_tri else []
+    qual_sel  = qual[qual["target_name"].isin(sel_targets)] if len(sel_targets) else qual.iloc[0:0]
+    bad_days  = pd.to_datetime(qual_sel.loc[qual_sel["sev"]>=2, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_x else []
+    warn_days = pd.to_datetime(qual_sel.loc[qual_sel["sev"]==1, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_tri else []
     
-    # --- 右軸に出すシリーズを選ぶ（単位欠損でもOK: 名前で推定） ---
-    # シリーズごとの unit を1つ拾う（無ければ空文字）
+    # 右軸に出すシリーズを選択（単位欠損でもOK）
     series = (num.groupby("target_name")
-                .agg(unit=("unit", lambda s: next((u for u in s if pd.notna(u) and str(u) not in ["nan","None",""]), "")),
-                     med=("value_num","median"))
+                .agg(unit=("unit", lambda s: next((u for u in s if pd.notna(u) and str(u) not in ["nan","None",""]), "")))
                 .reset_index())
     
-    # 初期候補：名称に「圧/圧力/差圧/MPa/kPa/電圧/V」などが含まれるものを右軸に
-    KW_RIGHT = ("圧力", "差圧", "圧", "MPa", "kPa", "電圧", "V")
+    KW_RIGHT = ("圧力","差圧","圧","MPa","kPa","電圧","V")  # 初期候補
     suggest_right = [row.target_name for row in series.itertuples(index=False)
                      if any(k in row.target_name for k in KW_RIGHT)]
-    right_targets = st.multiselect(
-        "右軸にする項目（圧力・電圧など）", series["target_name"].tolist(), default=suggest_right
-    )
+    right_targets = st.multiselect("右軸にする項目（圧力・電圧など）",
+                                   series["target_name"].tolist(), default=suggest_right)
     
-    # 図（左右軸）
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    # 数値トレース（右軸=選択された項目）
+    # 数値トレース
     for tname, g in num.groupby("target_name"):
-        unit_label = series.loc[series["target_name"] == tname, "unit"].iloc[0]
+        unit_label = series.loc[series["target_name"]==tname, "unit"].iloc[0]
         fig.add_trace(
-            go.Scatter(
-                x=g["date"], y=g["value_num"], mode="lines+markers", name=tname,
-                hovertemplate="%{x|%Y-%m-%d}<br>%{y} " + (unit_label or "")
-            ),
+            go.Scatter(x=g["date"], y=g["value_num"], mode="lines+markers",
+                       name=tname, hovertemplate="%{x|%Y-%m-%d}<br>%{y} "+(unit_label or "")),
             secondary_y=(tname in right_targets)
         )
     
-    # 軸タイトル（左/右で使われている単位をまとめる。無いときはラベルだけ）
-    left_units  = series.loc[~series["target_name"].isin(right_targets), "unit"].unique().tolist()
-    right_units = series.loc[ series["target_name"].isin(right_targets), "unit"].unique().tolist()
-    left_label  = " / ".join([u for u in left_units  if u]) or "左軸"
-    right_label = " / ".join([u for u in right_units if u]) or "右軸"
-    
-    fig.update_yaxes(title_text=left_label,  secondary_y=False)
-    fig.update_yaxes(title_text=right_label, secondary_y=True)
-
-    # 背景シェード（△=黄, ×=赤）
+    # 背景シェード
     for d in warn_days:
         fig.add_vrect(x0=d, x1=d, fillcolor="#FFD166", opacity=shade_alpha, line_width=0)
     for d in bad_days:
         fig.add_vrect(x0=d, x1=d, fillcolor="#EF476F", opacity=min(shade_alpha+0.05, 0.5), line_width=0)
     
-    # 上部マーカー（記号で日付を示す）
+    # 上部マーカー
     if st.checkbox("×/△ を上部に記号表示", value=True):
         for d in bad_days:
             fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="×", showarrow=False,
@@ -443,16 +428,18 @@ with tab2:
             fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="▲", showarrow=False,
                                font=dict(color="#FFD166", size=12))
     
-    # 軸タイトル
-    left_label  = units_pick[0] if len(units_pick)>=1 else ""
-    right_label = units_pick[1] if len(units_pick)>=2 else ""
-    fig.update_yaxes(title_text=left_label, secondary_y=False)
-    if right_label:
-        fig.update_yaxes(title_text=right_label, secondary_y=True)
+    # 軸タイトル（←スクショで left_label が「右軸」になってたので直してね）
+    left_units  = series.loc[~series["target_name"].isin(right_targets), "unit"].unique().tolist()
+    right_units = series.loc[ series["target_name"].isin(right_targets), "unit"].unique().tolist()
+    left_label  = " / ".join([u for u in left_units  if u]) or "左軸"
+    right_label = " / ".join([u for u in right_units if u]) or "右軸"
+    fig.update_yaxes(title_text=left_label,  secondary_y=False)
+    fig.update_yaxes(title_text=right_label, secondary_y=True)
     
     fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     st.plotly_chart(fig, use_container_width=True)
+
     
     # --- 下：イベント（五感）一覧 ---
     if not qual.empty:
