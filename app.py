@@ -236,24 +236,157 @@ with tab1:  # 日報
     st.dataframe(issues, use_container_width=True)
 
 with tab2:  # 設備
-    st.subheader("設備の点検結果")
-    devices = con.execute("SELECT id, name FROM devices WHERE tenant=?", [TENANT]).df()
-    dev = st.selectbox("設備を選択", options=devices["id"] if not devices.empty else [])
+    st.title("🛠️ 設備ページ")
+
+    # --- 段階選択（物件→棟→フロア→部屋→設備） ---
+    blds = con.execute(
+        "SELECT DISTINCT building_id FROM devices WHERE tenant=?", [TENANT]
+    ).df()["building_id"].tolist()
+    if not blds:
+        st.info("まずは『📥 取込』からマスタCSVを投入してください。")
+        st.stop()
+    bld = st.selectbox("物件", blds)
+
+    locs = con.execute(
+        "SELECT DISTINCT location_id FROM devices WHERE tenant=? AND building_id=?",
+        [TENANT, bld],
+    ).df()["location_id"].tolist()
+    loc = st.selectbox("棟", locs) if locs else None
+
+    flrs = con.execute(
+        """SELECT DISTINCT floor_id FROM devices
+           WHERE tenant=? AND building_id=? AND location_id=?""",
+        [TENANT, bld, loc],
+    ).df()["floor_id"].tolist() if loc else []
+    flr = st.selectbox("フロア", flrs) if flrs else None
+
+    rooms = con.execute(
+        """SELECT DISTINCT room_id FROM devices
+           WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=?""",
+        [TENANT, bld, loc, flr],
+    ).df()["room_id"].tolist() if flr else []
+    room = st.selectbox("部屋", rooms) if rooms else None
+
+    devs = con.execute(
+        """SELECT id,name FROM devices
+           WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=? AND room_id=?""",
+        [TENANT, bld, loc, flr, room],
+    ).df() if room else pd.DataFrame(columns=["id","name"])
+
+    dev = st.selectbox("設備", options=devs["id"] if not devs.empty else [])
+    if not dev:
+        st.stop()
+
+    # --- ヘッダー情報（基本情報＋CMMSリンク） ---
+    meta = con.execute(
+        "SELECT * FROM devices WHERE tenant=? AND id=?", [TENANT, dev]
+    ).df().iloc[0]
+    st.markdown(f"### {meta['name']}　〔{bld} / {loc} / {flr} / {room}〕")
+    if pd.notna(meta.get("cmms_url_rule")) and str(meta.get("cmms_url_rule")) not in ("", "None"):
+        st.link_button("CMMSで開く", str(meta["cmms_url_rule"]))
+
+    # --- 期間選択 ---
     dr = st.date_input("期間", [])
-    if dev and len(dr)==2:
-        q = """
-        SELECT r.date, r.target_id, r.value_num, r.value_text
-        FROM results r JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
-        WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ? ORDER BY r.date
-        """
-        df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
-        num = df.dropna(subset=["value_num"])
+    if len(dr) != 2:
+        st.info("期間を選択すると、グラフと表が表示されます。")
+        st.stop()
+
+    # --- 点検結果の取得（targetsと閾値をJOIN） ---
+    q = """
+      SELECT r.date, r.target_id, r.value_num, r.value_text,
+             t.name AS target_name, t.unit, t.lower, t.upper
+      FROM results r
+      JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
+      WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ?
+      ORDER BY r.date
+    """
+    df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
+
+    # --- KPI：対象数/データ点/異常件数（閾値逸脱 or ×/NG） ---
+    if df.empty:
+        st.warning("期間内のデータがありません。")
+    else:
+        abnormal_mask = (
+            (df["value_num"].notna() & (
+                (df["lower"].notna() & (df["value_num"] < df["lower"])) |
+                (df["upper"].notna() & (df["value_num"] > df["upper"]))
+            )) |
+            (df["value_num"].isna() & df["value_text"].isin(["×", "NG"]))
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("対象項目", int(df["target_id"].nunique()))
+        c2.metric("データ点数", int(df.shape[0]))
+        c3.metric("異常件数", int(abnormal_mask.sum()))
+
+        # --- 数値系：ラインチャート + 要約表（最新/最小/最大/平均） ---
+        num = df.dropna(subset=["value_num"]).copy()
         if not num.empty:
-            st.plotly_chart(px.line(num, x="date", y="value_num", color="target_id"), use_container_width=True)
-        qual = df[df["value_num"].isna()]
+            # 時系列グラフ
+            st.subheader("数値ターゲット（推移）")
+            st.plotly_chart(
+                px.line(num, x="date", y="value_num", color="target_name", markers=True),
+                use_container_width=True
+            )
+            # 要約表
+            latest = num.sort_values("date").groupby("target_name").tail(1).set_index("target_name")[["value_num","unit"]]
+            stats = num.groupby("target_name")["value_num"].agg(最小="min", 最大="max", 平均="mean")
+            summary = latest.join(stats, how="left").rename(columns={"value_num":"最新値"})
+            st.markdown("**数値ターゲットの要約**")
+            st.dataframe(summary.reset_index(), use_container_width=True)
+
+        # --- 五感/選択系：○/△/×の表（日付×項目） ---
+        qual = df[df["value_num"].isna()].copy()
         if not qual.empty:
-            st.dataframe(qual.pivot_table(index="date", columns="target_id", values="value_text", aggfunc="first"),
-                         use_container_width=True)
+            st.subheader("五感/選択ターゲット（○/△/×）")
+            pivot = qual.pivot_table(
+                index="date", columns="target_name", values="value_text", aggfunc="first"
+            )
+            st.dataframe(pivot, use_container_width=True)
+
+    # --- この設備の不具合 ---
+    st.subheader("この設備に紐づく不具合")
+    iss = con.execute(
+        """SELECT id, reported_on, due_on, status, severity, category, summary
+           FROM issues WHERE tenant=? AND device_id=?
+           ORDER BY COALESCE(due_on, reported_on) DESC""",
+        [TENANT, dev]
+    ).df()
+    c1, c2, c3 = st.columns(3)
+    if iss.empty:
+        c1.metric("未完了", 0); c2.metric("期限超過", 0); c3.metric("今月新規", 0)
+        st.info("紐づく不具合はありません。")
+    else:
+        not_done = ~iss["status"].isin(["完了", "対応済"])
+        overdue = pd.to_datetime(iss["due_on"], errors="coerce") < pd.Timestamp.today()
+        this_month = pd.to_datetime(iss["reported_on"], errors="coerce").dt.to_period("M") == pd.Timestamp.today().to_period("M")
+        c1.metric("未完了", int(iss[not_done].shape[0]))
+        c2.metric("期限超過", int(iss[not_done & overdue].shape[0]))
+        c3.metric("今月新規", int(iss[this_month].shape[0]))
+        st.dataframe(iss, use_container_width=True)
+
+    # --- ドキュメント（設備にバインド） ---
+    st.subheader("ドキュメント")
+    docs = con.execute(
+        """SELECT d.id, d.title, d.category, d.tags, d.ai_summary
+           FROM document_bindings b
+           JOIN documents d ON d.tenant=b.tenant AND d.id=b.doc_id
+           WHERE b.tenant=? AND b.entity_type='device' AND b.entity_id=?
+           ORDER BY d.uploaded_at DESC""",
+        [TENANT, dev]
+    ).df()
+    if docs.empty:
+        st.info("この設備に紐づくドキュメントは未登録です。")
+    else:
+        st.dataframe(docs, use_container_width=True)
+
+    # --- 点検項目（Targets 定義） ---
+    st.subheader("点検項目（Targets 定義）")
+    tl = con.execute(
+        """SELECT id AS target_id, name, input_type, unit, lower, upper, ord
+           FROM targets WHERE tenant=? AND device_id=? ORDER BY ord""",
+        [TENANT, dev]
+    ).df()
+    st.dataframe(tl, use_container_width=True)
 
 with tab3:  # 月報（プレースホルダ）
     st.subheader("指定月のサマリー（プレースホルダ）")
@@ -328,36 +461,5 @@ if dev:
                 use_container_width=True
             )
 
-    # --- この設備の不具合 ---
-    st.subheader("この設備の不具合")
-    iss = con.execute("""
-      SELECT id, reported_on, due_on, status, severity, category, summary
-      FROM issues WHERE tenant=? AND device_id=? ORDER BY COALESCE(due_on, reported_on) DESC
-    """, [TENANT, dev]).df()
-    c1,c2,c3 = st.columns(3)
-    c1.metric("未完了", iss[~iss["status"].isin(["完了","対応済"])].shape[0] if not iss.empty else 0)
-    c2.metric("期限超過", iss[(~iss["status"].isin(["完了","対応済"])) &
-                              (pd.to_datetime(iss["due_on"], errors="coerce") < pd.Timestamp.today())].shape[0] if not iss.empty else 0)
-    c3.metric("今月新規", iss[pd.to_datetime(iss["reported_on"], errors="coerce").dt.to_period("M")==pd.Timestamp.today().to_period("M")].shape[0] if not iss.empty else 0)
-    st.dataframe(iss, use_container_width=True)
-
-    # --- ドキュメント ---
-    st.subheader("ドキュメント")
-    docs = con.execute("""
-      SELECT d.doc_id AS id, d.title, d.category, d.tags, d.ai_summary
-      FROM document_bindings b JOIN documents d
-      ON d.tenant=b.tenant AND d.doc_id=b.doc_id
-      WHERE b.tenant=? AND b.entity_type='device' AND b.entity_id=?
-      ORDER BY d.uploaded_at DESC
-    """, [TENANT, dev]).df()
-    st.dataframe(docs, use_container_width=True)
-
-    # --- 点検項目マスタ（Targets 定義） ---
-    st.subheader("点検項目（Targets）")
-    tl = con.execute("""
-      SELECT id AS target_id, name, input_type, unit, lower, upper, ord
-      FROM targets WHERE tenant=? AND device_id=? ORDER BY ord
-    """, [TENANT, dev]).df()
-    st.dataframe(tl, use_container_width=True)
-
+  
 
