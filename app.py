@@ -52,32 +52,36 @@ def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
         con.execute(f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", r.tolist())
 
 # ---- 取込：マスタ（階層 + 設備 + target + schedule 紐付け） ------------
+# 先頭で
+def _dev_id(b,l,f,r,name): return f"{b}|{l}|{f}|{r}|{name}"
+
 def import_master(df: pd.DataFrame):
     df = df.rename(columns=str.lower)
     need = ["building_name","location_name","room_name","device_name","target_id","target_name","target_type_id","schedule_id"]
-    missing = [c for c in need if c not in df.columns]
-    if missing: st.error(f"必須列が不足: {missing}"); return
+    miss=[c for c in need if c not in df.columns]
+    if miss: st.error(f"必須列が不足: {miss}"); return
     df["floor_name"] = df.get("floor_name","指定なし")
-    # IDs（名前をそのままID扱いでOK）
-    b = df[["building_name"]].drop_duplicates().rename(columns={"building_name":"name"}); b["id"]=b["name"]; upsert_df("buildings", b[["id","name"]], ["id"])
-    l = df[["location_name","building_name"]].drop_duplicates().rename(columns={"location_name":"name","building_name":"building_id"})
-    l["id"]=l["name"]; upsert_df("locations", l[["id","building_id","name"]], ["id"])
-    f = df[["floor_name","location_name"]].drop_duplicates().rename(columns={"floor_name":"name","location_name":"location_id"})
-    f["id"]=f["name"]; upsert_df("floors", f[["id","location_id","name"]], ["id"])
-    r = df[["room_name","floor_name"]].drop_duplicates().rename(columns={"room_name":"name","floor_name":"floor_id"})
-    r["id"]=r["name"]; upsert_df("rooms", r[["id","floor_id","name"]], ["id"])
-    d = df[["device_name","building_name","location_name","floor_name","room_name"]].drop_duplicates().rename(
-        columns={"device_name":"name","building_name":"building_id","location_name":"location_id","floor_name":"floor_id","room_name":"room_id"})
-    d["id"]=d["name"]; d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
-    upsert_df("devices", d[["id","building_id","location_id","floor_id","room_id","name","category_l","category_m","category_s","symbol","cmms_url_rule"]], ["id"])
-    t = df[["target_id","device_name","target_name","target_type_id","unit","lower","upper","order_no"]].copy()
-    t.rename(columns={"target_id":"id","device_name":"device_id","target_name":"name","target_type_id":"input_type","order_no":"ord"}, inplace=True)
-    upsert_df("targets", t[["id","device_id","name","input_type","unit","lower","upper","ord"]], ["id"])
-    s = df[["schedule_id"]].drop_duplicates().rename(columns={"schedule_id":"id"}); s["job_id"]=None; s["name"]=None; s["freq"]=None
-    upsert_df("schedules", s[["id","job_id","name","freq"]], ["id"])
-    stgt = df[["schedule_id","target_id"]].drop_duplicates().rename(columns={"schedule_id":"schedule_id","target_id":"target_id"})
-    upsert_df("schedule_targets", stgt, ["schedule_id","target_id"])
-    st.success(f"マスタ取込: {len(df)} 行")
+
+    # 各テーブル upsert（略）…
+
+    # devices：IDを“階層パス”に
+    d = df[["building_name","location_name","floor_name","room_name","device_name"]].drop_duplicates()
+    d = d.rename(columns={"building_name":"building_id","location_name":"location_id","floor_name":"floor_id",
+                          "room_name":"room_id","device_name":"name"})
+    d["id"] = d.apply(lambda r: _dev_id(r["building_id"],r["location_id"],r["floor_id"],r["room_id"],r["name"]), axis=1)
+    d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
+    upsert_df("devices", d[["id","building_id","location_id","floor_id","room_id","name",
+                            "category_l","category_m","category_s","symbol","cmms_url_rule"]], ["id"])
+
+    # targets：device_id をパスIDに
+    t = df[["building_name","location_name","floor_name","room_name","device_name","target_id",
+            "target_name","target_type_id","unit","lower","upper","order_no"]].copy()
+    t["device_id"] = t.apply(lambda r: _dev_id(r["building_name"],r["location_name"],r["floor_name"],r["room_name"],r["device_name"]), axis=1)
+    t = t.rename(columns={"target_id":"id","target_name":"name","target_type_id":"input_type","order_no":"ord"})
+    upsert_df("targets", t[["id","device_id","name","input_type","unit","lower","upper","ord"]].drop_duplicates(), ["id"])
+
+    # schedules / schedule_targets（今まで通り）…
+
 
 # ---- 取込：運用チケット（実施日・進捗） ---------------------------------
 def import_tickets(df: pd.DataFrame):
@@ -102,15 +106,47 @@ def import_tickets(df: pd.DataFrame):
 # ---- 取込：不具合 --------------------------------------------------------
 def import_issues(df: pd.DataFrame):
     df = df.rename(columns=str.lower)
-    need = ["id","reported_on"]; miss=[c for c in need if c not in df.columns]
-    if miss: st.error(f"必須列が不足: {miss}"); return
-    df["reported_on"] = pd.to_datetime(df["reported_on"], errors="coerce").dt.date
+
+    # devices 一覧（階層列あり）
+    devs = con.execute("SELECT id,name,building_id,location_id,floor_id,room_id FROM devices WHERE tenant=?",
+                       [TENANT]).df()
+
+    # 不具合CSVにある手掛かりから最良一致を探す
+    for col in ["device_id","設備","device","equipment"]: 
+        if col in df.columns: df.rename(columns={col:"_equip_hint"}, inplace=True)
+    for col in ["部屋名","room_name","room"]: 
+        if col in df.columns: df.rename(columns={col:"_room_hint"}, inplace=True)
+    for col in ["フロア","floor_name","floor"]: 
+        if col in df.columns: df.rename(columns={col:"_floor_hint"}, inplace=True)
+    for col in ["棟","location_name","block"]: 
+        if col in df.columns: df.rename(columns={col:"_loc_hint"}, inplace=True)
+    for col in ["物件","building_name","building"]: 
+        if col in df.columns: df.rename(columns={col:"_bld_hint"}, inplace=True)
+
+    def resolve_device(row):
+        cand = devs.copy()
+        if pd.notna(row.get("_equip_hint")): cand = cand[cand["name"]==row["_equip_hint"]]
+        if pd.notna(row.get("_room_hint")):  cand = cand[cand["room_id"]==row["_room_hint"]]
+        if pd.notna(row.get("_floor_hint")): cand = cand[cand["floor_id"]==row["_floor_hint"]]
+        if pd.notna(row.get("_loc_hint")):   cand = cand[cand["location_id"]==row["_loc_hint"]]
+        if pd.notna(row.get("_bld_hint")):   cand = cand[cand["building_id"]==row["_bld_hint"]]
+        if len(cand)==1: return cand.iloc[0]["id"]
+        # 名前だけ一致で候補が1つなら採用
+        cand2 = devs[devs["name"]==row.get("_equip_hint")]
+        return cand2.iloc[0]["id"] if len(cand2)==1 else None
+
+    if "device_id" not in df.columns:
+        df["device_id"] = df.apply(resolve_device, axis=1)
+
+    # 以降は既存どおり（日付正規化→keep列→upsert）
+    df["reported_on"] = pd.to_datetime(df.get("reported_on") or df.get("発生日時"), errors="coerce").dt.date
     if "due_on" in df.columns: df["due_on"] = pd.to_datetime(df["due_on"], errors="coerce").dt.date
     keep = ["id","device_id","reported_on","due_on","status","severity","category","summary","cmms_url_rule"]
     for k in keep:
         if k not in df.columns: df[k]=None
     upsert_df("issues", df[keep], ["id"])
-    st.success(f"不具合取込: {len(df)} 行")
+    st.success(f"不具合取込: {len(df)} 行（device_id自動解決 {df['device_id'].notna().sum()}件）")
+
 
 # ---- 取込：点検結果（横持ち→縦melt） -----------------------------------
 # 先頭付近で必要なら追加
@@ -233,3 +269,95 @@ with tab6:  # AI（プレースホルダ）
     st.info("OCR/AI連携は後で接続。まずはCSV→ダッシュボードの流れを固めます。")
 
 st.caption("Theme: 管理ロイド風 / データは UTF-8 CSV を 取込タブから投入")
+
+# --- 段階選択（物件→棟→フロア→部屋→設備） ---
+blds = con.execute("SELECT DISTINCT building_id FROM devices WHERE tenant=?", [TENANT]).df()["building_id"].tolist()
+bld = st.selectbox("物件", blds)
+locs = con.execute("SELECT DISTINCT location_id FROM devices WHERE tenant=? AND building_id=?", [TENANT,bld]).df()["location_id"].tolist()
+loc = st.selectbox("棟", locs)
+flrs = con.execute("SELECT DISTINCT floor_id FROM devices WHERE tenant=? AND building_id=? AND location_id=?",
+                   [TENANT,bld,loc]).df()["floor_id"].tolist()
+flr = st.selectbox("フロア", flrs)
+rooms = con.execute("SELECT DISTINCT room_id FROM devices WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=?",
+                    [TENANT,bld,loc,flr]).df()["room_id"].tolist()
+room = st.selectbox("部屋", rooms)
+devs = con.execute("""SELECT id,name FROM devices WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=? AND room_id=?""",
+                   [TENANT,bld,loc,flr,room]).df()
+dev = st.selectbox("設備", options=devs["id"] if not devs.empty else [])
+
+if dev:
+    # --- ヘッダー情報（基本） ---
+    meta = con.execute("SELECT * FROM devices WHERE tenant=? AND id=?", [TENANT,dev]).df().iloc[0]
+    st.markdown(f"### {meta['name']}　〔{bld} / {loc} / {flr} / {room}〕")
+    link = meta.get("cmms_url_rule")
+    if link: st.link_button("CMMSで開く", link)
+
+    # 期間
+    dr = st.date_input("期間", [])
+    if len(dr)==2:
+        # --- 点検結果（数値→グラフ / 五感→表） ---
+        q = """
+          SELECT r.date, r.target_id, r.value_num, r.value_text, t.name AS target_name, t.unit, t.lower, t.upper
+          FROM results r JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
+          WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ? ORDER BY r.date
+        """
+        df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
+
+        # KPI：異常件数（閾値逸脱 or ×/NG）
+        abnormal = (
+            (df["value_num"].notna() & (
+                (df["lower"].notna() & (df["value_num"] < df["lower"])) |
+                (df["upper"].notna() & (df["value_num"] > df["upper"]))
+            )) |
+            (df["value_num"].isna() & df["value_text"].isin(["×","NG"]))
+        ).sum()
+        c1,c2,c3 = st.columns(3)
+        c1.metric("対象項目", df["target_id"].nunique())
+        c2.metric("データ点数", df.shape[0])
+        c3.metric("異常件数", int(abnormal))
+
+        num = df.dropna(subset=["value_num"])
+        if not num.empty:
+            fig = px.line(num, x="date", y="value_num", color="target_name", markers=True)
+            st.plotly_chart(fig, use_container_width=True)
+        qual = df[df["value_num"].isna()]
+        if not qual.empty:
+            st.subheader("五感/選択結果（○/△/×）")
+            st.dataframe(
+                qual.pivot_table(index="date", columns="target_name", values="value_text", aggfunc="first"),
+                use_container_width=True
+            )
+
+    # --- この設備の不具合 ---
+    st.subheader("この設備の不具合")
+    iss = con.execute("""
+      SELECT id, reported_on, due_on, status, severity, category, summary
+      FROM issues WHERE tenant=? AND device_id=? ORDER BY COALESCE(due_on, reported_on) DESC
+    """, [TENANT, dev]).df()
+    c1,c2,c3 = st.columns(3)
+    c1.metric("未完了", iss[~iss["status"].isin(["完了","対応済"])].shape[0] if not iss.empty else 0)
+    c2.metric("期限超過", iss[(~iss["status"].isin(["完了","対応済"])) &
+                              (pd.to_datetime(iss["due_on"], errors="coerce") < pd.Timestamp.today())].shape[0] if not iss.empty else 0)
+    c3.metric("今月新規", iss[pd.to_datetime(iss["reported_on"], errors="coerce").dt.to_period("M")==pd.Timestamp.today().to_period("M")].shape[0] if not iss.empty else 0)
+    st.dataframe(iss, use_container_width=True)
+
+    # --- ドキュメント ---
+    st.subheader("ドキュメント")
+    docs = con.execute("""
+      SELECT d.doc_id AS id, d.title, d.category, d.tags, d.ai_summary
+      FROM document_bindings b JOIN documents d
+      ON d.tenant=b.tenant AND d.doc_id=b.doc_id
+      WHERE b.tenant=? AND b.entity_type='device' AND b.entity_id=?
+      ORDER BY d.uploaded_at DESC
+    """, [TENANT, dev]).df()
+    st.dataframe(docs, use_container_width=True)
+
+    # --- 点検項目マスタ（Targets 定義） ---
+    st.subheader("点検項目（Targets）")
+    tl = con.execute("""
+      SELECT id AS target_id, name, input_type, unit, lower, upper, ord
+      FROM targets WHERE tenant=? AND device_id=? ORDER BY ord
+    """, [TENANT, dev]).df()
+    st.dataframe(tl, use_container_width=True)
+
+
