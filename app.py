@@ -468,10 +468,26 @@ with tab2:
             row=1, col=1
         )
     # 異常日の縦帯
-    if not qual.empty:
-        bad_days = qual[qual["score"] >= 2]["date"].dt.normalize().unique()
-        for d in bad_days:
-            fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="red", opacity=0.08, line_width=0)
+    # 五感スコア列を用意（なければ作成）
+    if "sev" not in qual.columns:
+        sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "▲":1, "×":2, "NG":2, "異常":2}
+        qual["sev"] = qual["value_text"].map(sev_map).astype("float")
+    
+    # 異常日の縦帯（×/NGなど sev>=2）
+    bad_days = (
+        pd.to_datetime(qual.loc[qual["sev"] >= 2, "date"], errors="coerce")
+          .dt.normalize().dropna().unique()
+    )
+    
+    warn_days = (
+        pd.to_datetime(qual.loc[qual["sev"] == 1, "date"], errors="coerce")
+          .dt.normalize().dropna().unique()
+    )
+for d in warn_days:
+    fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="#FFD166", opacity=0.10, line_width=0)
+
+for d in bad_days:
+    fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="red", opacity=0.08, line_width=0)
     # 下段：五感ヒートマップ
     if not heat.empty:
         colorscale = [[0.0, "#3CB371"], [0.5, "#FFD166"], [1.0, "#EF476F"]]  # 0=緑,1=黄,2=赤
