@@ -167,7 +167,10 @@ with tab5:  # 取込
 
 with tab1:  # 日報
     st.subheader("本日の業務予定と進捗")
-    target_date = st.date_input("対象日", pd.Timestamp.today()).to_pydatetime().date()
+  # その1: 標準のdateを使う
+    from datetime import date
+    target_date = st.date_input("対象日", value=date.today())
+
     kpi = con.execute("SELECT planned, done, overdue FROM daily_kpis WHERE tenant=? AND date=?",
                       [TENANT, target_date]).fetchone()
     planned, done, overdue = (kpi if kpi else (0,0,0))
