@@ -535,29 +535,58 @@ def render_analysis():
             st.success("daily_kpis 再計算")
 
     # ===== 日報 =========================================================
-    with tab1:
-        st.subheader("本日の業務予定と進捗")
-        target_date = st.date_input("対象日", value=date.today())
-        kpi = con.execute(
-            "SELECT planned, done, overdue FROM daily_kpis WHERE tenant=? AND date=?",
-            [TENANT, target_date]
-        ).fetchone()
-        planned, done, overdue = (kpi if kpi else (0, 0, 0))
-        c1, c2, c3 = st.columns(3)
-        c1.metric("予定", planned); c2.metric("完了", done); c3.metric("期限超過", overdue)
+   with tab1:
+    st.subheader("本日の業務予定と進捗")
+    target_date = st.date_input("対象日", value=date.today())
 
+    # 業務名を JOIN
+    q = """
+    SELECT
+        sd.schedule_id,
+        COALESCE(s.name, CAST(sd.schedule_id AS VARCHAR)) AS job_name,
+        sd.date, sd.status, sd.done, sd.total, sd.done_at
+    FROM schedule_dates sd
+    LEFT JOIN schedules s
+      ON s.tenant = sd.tenant AND s.id = sd.schedule_id
+    WHERE sd.tenant = ? AND sd.date = ?
+    ORDER BY job_name
+    """
+    df = con.execute(q, [TENANT, target_date]).df()
+
+    # KPIは生計算（daily_kpis に依存しない）
+    planned = int(df.shape[0])
+    done = int(df["status"].isin(["完了","実施済"]).sum()) if not df.empty else 0
+    overdue = 0  # 当日ページなので 0 にする。必要ならロジックを入れてください。
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("予定", planned)
+    c2.metric("完了", done)
+    c3.metric("期限超過", overdue)
+
+    # 表示整形
+    if df.empty:
+        st.info("対象日のデータがありません。")
+    else:
+        view = df.rename(columns={
+            "schedule_id": "スケジュールID",
+            "job_name": "業務名",
+            "status": "ステータス",
+            "done": "完了",
+            "total": "総数",
+            "done_at": "完了日時"
+        })
         st.dataframe(
-            con.execute("SELECT * FROM schedule_dates WHERE tenant=? AND date=?",
-                        [TENANT, target_date]).df(),
+            view[["スケジュールID","業務名","ステータス","完了","総数","完了日時"]],
             use_container_width=True
         )
 
-        st.subheader("本日発生の不具合")
-        st.dataframe(
-            con.execute("SELECT * FROM issues WHERE tenant=? AND reported_on=?",
-                        [TENANT, target_date]).df(),
-            use_container_width=True
-        )
+    st.subheader("本日発生の不具合")
+    issues = con.execute(
+        "SELECT * FROM issues WHERE tenant=? AND reported_on=?",
+        [TENANT, target_date]
+    ).df()
+    st.dataframe(issues, use_container_width=True)
+
 
     # ===== 設備 =========================================================
     with tab2:
