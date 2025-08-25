@@ -48,20 +48,49 @@ TENANT = st.session_state.setdefault("tenant", "demo")
 
 # ---- 共通: 簡易アップサート ---------------------------------------------
 def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
-    if df is None or df.empty:
+    if df.empty:
         return
     df = df.copy()
     df["tenant"] = TENANT
+
+    # PK を正規化 & 欠損/空を除外
+    for k in pk:
+        df[k] = df[k].apply(_norm)
+    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
+    bad = len(df) - int(mask_valid.sum())
+    if bad:
+        st.warning(f"{table}: PK欠損で {bad} 行をスキップ（空/NaN/None）")
+    df = df[mask_valid]
+
+    # PK 重複を折りたたみ
+    before = len(df)
+    df = df.drop_duplicates(subset=pk, keep="last")
+    dup = before - len(df)
+    if dup:
+        st.warning(f"{table}: PK重複で {dup} 行を折りたたみ")
+
     cols = list(df.columns)
     for _, r in df.iterrows():
         where = " AND ".join([f"{k} = ?" for k in ["tenant", *pk]])
         con.execute(f"DELETE FROM {table} WHERE {where}", [TENANT, *[r[k] for k in pk]])
-        con.execute(f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", r.tolist())
+        con.execute(
+            f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",
+            r.tolist()
+        )
+
 
 # ---- 便利：階層パスで一意な device_id を作る ----------------------------
+# --- ID生成ヘルパ（欠損/空/スペース/Noneを吸収）---
+def _norm(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return ""
+    s = str(x).strip()
+    return "" if s.lower() in ("nan", "none") else s
+
 def _dev_id(b, l, f, r, name):
-    b = b or "指定なし"; l = l or "指定なし"; f = f or "指定なし"; r = r or "指定なし"; name = name or "不明設備"
-    return f"{b}|{l}|{f}|{r}|{name}"
+    # すべて正規化してから連結
+    return "|".join([_norm(b), _norm(l), _norm(f), _norm(r), _norm(name)])
+
 
 # ---- 取込：マスタ（階層 + 設備 + target + schedule 紐付け） ------------
 def import_master(df: pd.DataFrame):
@@ -111,14 +140,49 @@ def import_master(df: pd.DataFrame):
     # devices のID（階層パス）
     def _dev_id(b,l,f,r,name): return f"{b}|{l}|{f}|{r}|{name}"
 
-    # devices
-    d = df[["building_name","location_name","floor_name","room_name","device_name"]].drop_duplicates()
+       # --- devices：安全にID作成 → 重複/欠損を除去してUPSERT ---
+    d = df[["building_name","location_name","floor_name","room_name","device_name"]].copy()
     d = d.rename(columns={"building_name":"building_id","location_name":"location_id",
                           "floor_name":"floor_id","room_name":"room_id","device_name":"name"})
-    d["id"] = d.apply(lambda r: _dev_id(r["building_id"],r["location_id"],r["floor_id"],r["room_id"],r["name"]), axis=1)
+    for c in ["building_id","location_id","floor_id","room_id","name"]:
+        d[c] = d[c].apply(_norm)
+
+    # 設備名が空の行は除外
+    d = d[d["name"].str.len() > 0]
+
+    # ID作成
+    d["id"] = d.apply(lambda r: _dev_id(r["building_id"], r["location_id"],
+                                        r["floor_id"], r["room_id"], r["name"]), axis=1)
+
+    # ID重複があれば警告しつつ畳む
+    if d.duplicated(subset=["id"]).any():
+        cnt = int(d.duplicated(subset=["id"], keep=False).sum())
+        st.warning(f"devices: 同一IDが {cnt} 行見つかりました（一部を折りたたみます）")
+    d = d.drop_duplicates(subset=["id"], keep="last")
+
     d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
-    upsert_df("devices", d[["id","building_id","location_id","floor_id","room_id","name",
-                            "category_l","category_m","category_s","symbol","cmms_url_rule"]], ["id"])
+    upsert_df(
+        "devices",
+        d[["id","building_id","location_id","floor_id","room_id","name",
+           "category_l","category_m","category_s","symbol","cmms_url_rule"]],
+        ["id"]
+    )
+
+    # --- targets：device_id を安全生成してUPSERT ---
+    t = df[["building_name","location_name","floor_name","room_name","device_name",
+            "target_id","target_name","target_type_id","unit","lower","upper","order_no"]].copy()
+
+    for c in ["building_name","location_name","floor_name","room_name","device_name"]:
+        t[c] = t[c].apply(_norm)
+
+    t["device_id"] = t.apply(lambda r: _dev_id(r["building_name"], r["location_name"],
+                                               r["floor_name"], r["room_name"], r["device_name"]), axis=1)
+    t = t.rename(columns={"target_id":"id","target_name":"name",
+                          "target_type_id":"input_type","order_no":"ord"})
+    t = t.drop_duplicates(subset=["id"], keep="last")
+
+    upsert_df("targets", t[["id","device_id","name","input_type","unit","lower","upper","ord"]], ["id"])
+
 
     # targets
     t = df[["building_name","location_name","floor_name","room_name","device_name",
