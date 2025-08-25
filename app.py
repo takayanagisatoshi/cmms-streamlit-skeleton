@@ -379,6 +379,19 @@ def import_tickets(df: pd.DataFrame):
         st.warning(f"schedule_id または date 欠損で {dropped} 行をスキップ")
 
     upsert_df("schedule_dates", s, ["schedule_id","date"])
+
+    # schedules に業務名を同期（年間計画を入れていない場合の保険）
+    if "name" in df.columns:
+        sch2 = (df[["schedule_id","name"]]
+                .dropna(subset=["schedule_id"])
+                .astype({"schedule_id": str}))
+        sch2["name"] = sch2["name"].astype(str).str.strip()
+        sch2 = sch2.drop_duplicates(subset=["schedule_id"])
+        sch2 = sch2.rename(columns={"schedule_id": "id"})
+        # freq は分からなければ入れないでOK
+        upsert_df("schedules", sch2[["id","name"]], ["id"])
+
+
     st.success(f"チケット取込: {len(s)} 行（自動解決あり）")
 
 
