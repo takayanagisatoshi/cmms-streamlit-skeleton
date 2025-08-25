@@ -67,7 +67,7 @@ def _dev_id(b, l, f, r, name):
 def import_master(df: pd.DataFrame):
     # ❶ 列名整形
     df = df.copy()
-    df.columns = [str(c).strip().lower()]
+    df.columns = [str(c).strip().lower()for c in df.columns]
 
     # ❷ エイリアス（日本語/英語どちらでも）
     alias = {
