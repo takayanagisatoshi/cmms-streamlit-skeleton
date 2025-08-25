@@ -94,11 +94,11 @@ def _dev_id(b, l, f, r, name):
 
 # ---- 取込：マスタ（階層 + 設備 + target + schedule 紐付け） ------------
 def import_master(df: pd.DataFrame):
-    # 列名整形
+    # ❶ 列名整形
     df = df.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
 
-    # エイリアス
+    # ❷ エイリアス
     alias = {
         "building_name": ["building","building_id","物件","物件名"],
         "location_name": ["location","棟","棟名","ブロック"],
@@ -121,31 +121,30 @@ def import_master(df: pd.DataFrame):
                     df.rename(columns={a: canon}, inplace=True)
                     break
 
+    # ❸ 必須列チェック
     need = ["building_name","location_name","room_name",
             "device_name","target_id","target_name","target_type_id","schedule_id"]
     miss = [c for c in need if c not in df.columns]
     if miss:
-        st.error(f"必須列が不足: {miss}"); st.write("受け取った列:", list(df.columns)); return
+        st.error(f"必須列が不足: {miss}")
+        st.write("受け取った列:", list(df.columns))
+        return
 
-    # 任意列を補完
-    for c, v in {"floor_name":"", "unit":None, "lower":None, "upper":None, "order_no":0}.items():
-        if c not in df.columns: df[c] = v
+    # ❹ 任意列デフォルト
+    defaults = {"floor_name":"", "unit":None, "lower":None, "upper":None, "order_no":0}
+    for c, v in defaults.items():
+        if c not in df.columns:
+            df[c] = v
 
-    # 正規化
-    def norm(x):
-        if x is None or (isinstance(x,float) and pd.isna(x)): return ""
-        s = str(x).strip()
-        return "" if s.lower() in ("nan","none") else s
-    def dev_id(b,l,f,r,name): return "|".join([norm(b),norm(l),norm(f),norm(r),norm(name)])
-
-    # ---- devices
+    # --- devices ---------------------------------------------------------
     d = df[["building_name","location_name","floor_name","room_name","device_name"]].copy()
     d = d.rename(columns={"building_name":"building_id","location_name":"location_id",
                           "floor_name":"floor_id","room_name":"room_id","device_name":"name"})
     for c in ["building_id","location_id","floor_id","room_id","name"]:
-        d[c] = d[c].apply(norm)
+        d[c] = d[c].apply(_norm)
     d = d[d["name"].str.len() > 0]
-    d["id"] = d.apply(lambda r: dev_id(r["building_id"], r["location_id"], r["floor_id"], r["room_id"], r["name"]), axis=1)
+    d["id"] = d.apply(lambda r: _dev_id(r["building_id"], r["location_id"],
+                                        r["floor_id"], r["room_id"], r["name"]), axis=1)
     d = d.drop_duplicates(subset=["id"], keep="last")
     d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
     upsert_df("devices",
@@ -153,21 +152,29 @@ def import_master(df: pd.DataFrame):
                  "category_l","category_m","category_s","symbol","cmms_url_rule"]],
               ["id"])
 
-    # ---- targets（※ここ“だけ”で一回実行。重複ブロックを残さない）
+    # --- targets（※ここだけで1回だけ upsert）-----------------------------
     t = df[["building_name","location_name","floor_name","room_name","device_name",
             "target_id","target_name","target_type_id","unit","lower","upper","order_no"]].copy()
-    for c in ["building_name","location_name","floor_name","room_name","device_name"]:
-        t[c] = t[c].apply(norm)
-    t["device_id"] = t.apply(lambda r: dev_id(r["building_name"], r["location_name"],
-                                             r["floor_name"], r["room_name"], r["device_name"]), axis=1)
+    for c in ["building_name","location_name","floor_name","room_name","device_name","target_id"]:
+        t[c] = t[c].apply(_norm)
+    # device_id 作成
+    t["device_id"] = t.apply(lambda r: _dev_id(r["building_name"], r["location_name"],
+                                               r["floor_name"], r["room_name"], r["device_name"]), axis=1)
+    # 整形
     t = t.rename(columns={"target_id":"id","target_name":"name",
                           "target_type_id":"input_type","order_no":"ord"})
-    # target_id 重複を畳む（最後勝ち）
+    # 空ID除外 & 重複折りたたみ
+    t = t[t["id"].str.len() > 0]
+    dup_cnt = int(t.duplicated(subset=["id"], keep=False).sum())
+    if dup_cnt:
+        st.warning(f"targets: 同一 target_id が {dup_cnt} 行見つかりました（最後の1件で上書きします）")
     t = t.drop_duplicates(subset=["id"], keep="last")
-    upsert_df("targets", t[["id","device_id","name","input_type","unit","lower","upper","ord"]], ["id"])
 
-    # schedules / schedule_targets は必要に応じて（ここでは省略）
-    st.success(f"マスタ取込: {len(df)} 行（targets {t.shape[0]} 件、devices {d.shape[0]} 件）")
+    upsert_df("targets",
+              t[["id","device_id","name","input_type","unit","lower","upper","ord"]],
+              ["id"])
+
+    st.success(f"マスタ取込: {len(df)} 行（不足列は既定値で補完）")
 
     # 以降は既存ロジックそのまま -----------------------------
     # devices のID（階層パス）
