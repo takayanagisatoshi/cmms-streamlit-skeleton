@@ -196,29 +196,144 @@ def import_master(df: pd.DataFrame):
     # schedules / schedule_targets は既存処理のままでOK
     st.success(f"マスタ取込: {len(df)} 行（不足列は既定値で補完）")
 
+def import_annual_plan(df: pd.DataFrame):
+    df = df.copy()
+    df.columns = [str(c).strip().lower().lstrip("\ufeff") for c in df.columns]
+
+    # 列名エイリアス（日本語/英語どちらでもOK）
+    alias = {
+        "schedule_id": ["schedule_id","スケジュールid","チケットid","job_id","業務id","id"],
+        "name":        ["schedule_name","job_name","業務名","作業名","名称","name"],
+        "freq":        ["freq","frequency","周期","頻度"],
+        # どちらかの形で来る想定（列ごと or 一覧）
+        "date":        ["date","予定日","実施日","日付"],
+        "start":       ["start","開始日","from"],
+        "end":         ["end","終了日","to"],
+        "status":      ["status","ステータス","状態"]
+    }
+    for canon, alts in alias.items():
+        if canon not in df.columns:
+            for a in alts:
+                if a in df.columns:
+                    df.rename(columns={a: canon}, inplace=True)
+                    break
+
+    # schedules（ユニーク）を upsert
+    sch = df[["schedule_id","name","freq"]].dropna(subset=["schedule_id"]).copy()
+    sch["schedule_id"] = sch["schedule_id"].astype(str).str.strip()
+    sch["name"] = sch["name"].astype(str).str.strip()
+    sch = sch.drop_duplicates(subset=["schedule_id"])
+    sch = sch.rename(columns={"schedule_id":"id"})
+    upsert_df("schedules", sch[["id","name","freq"]], ["id"])
+
+    # 予定日の作成
+    dates = pd.DataFrame(columns=["schedule_id","date","status","done","total","done_at"])
+    if "date" in df.columns:
+        # 行ごとに予定日が入っているパターン
+        dates = pd.DataFrame({
+            "schedule_id": df["schedule_id"].astype(str).str.strip(),
+            "date": pd.to_datetime(df["date"], errors="coerce").dt.date,
+            "status": df.get("status"),
+            "done": None, "total": None, "done_at": None
+        }).dropna(subset=["schedule_id","date"])
+    elif {"start","end"}.issubset(df.columns):
+        # 期間 + freq から展開するパターン（freqは任意）
+        tmp = []
+        for r in df.itertuples(index=False):
+            sid = str(getattr(r, "schedule_id")).strip()
+            if not sid: 
+                continue
+            start = pd.to_datetime(getattr(r, "start"), errors="coerce")
+            end   = pd.to_datetime(getattr(r, "end"), errors="coerce")
+            if pd.isna(start) or pd.isna(end) or end < start:
+                continue
+            # 簡易展開：freq が 'monthly','weekly','daily' などを想定
+            freq = (str(getattr(r, "freq") or "")).lower()
+            rule = {"monthly":"MS", "week":"W", "weekly":"W", "day":"D", "daily":"D"}.get(freq, "W")
+            for d in pd.date_range(start=start, end=end, freq=rule):
+                tmp.append((sid, d.date(), None))
+        if tmp:
+            dates = pd.DataFrame(tmp, columns=["schedule_id","date","status"])
+            dates["done"]=None; dates["total"]=None; dates["done_at"]=None
+
+    if not dates.empty:
+        upsert_df("schedule_dates", dates, ["schedule_id","date"])
+        st.success(f"年間業務計画 取込: schedules {sch.shape[0]} 件 / 予定日 {dates.shape[0]} 件")
+    else:
+        st.success(f"年間業務計画 取込: schedules {sch.shape[0]} 件（予定日は列なし）")
 
 # ---- 取込：運用チケット（実施日・進捗） ---------------------------------
 def import_tickets(df: pd.DataFrame):
-    df = df.rename(columns=str.lower)
-    need = ["date","schedule_id","status"]; miss=[c for c in need if c not in df.columns]
-    if miss: st.error(f"必須列が不足: {miss}"); return
+    df = df.copy()
+    df.columns = [str(c).strip().lower().lstrip("\ufeff") for c in df.columns]
 
-    def split_prog(x):
-        try: a,b = str(x).split("/"); return int(a), int(b)
-        except: return None, None
+    alias = {
+        "date":        ["実施日","予定日","日付","date"],
+        "schedule_id": ["schedule_id","スケジュールid","チケットid"],
+        "job_id":      ["job_id","業務id","業務コード"],
+        "name":        ["job_name","業務名","作業名","name"],
+        "status":      ["status","ステータス","状態"],
+        "progress":    ["progress","進捗","達成","完了/総数"]
+    }
+    for canon, alts in alias.items():
+        if canon not in df.columns:
+            for a in alts:
+                if a in df.columns:
+                    df.rename(columns={a: canon}, inplace=True)
+                    break
 
-    prog = df.get("progress")
-    done, total = zip(*[split_prog(x) for x in (prog if prog is not None else [])]) if len(df)>0 else ([],[])
-    s = pd.DataFrame({
-        "schedule_id": df["schedule_id"],
-        "date": pd.to_datetime(df["date"], errors="coerce").dt.date,
-        "status": df["status"],
-        "done": done, "total": total,
-        "done_at": pd.to_datetime(df.get("done_at"), errors="coerce")
-    })
-    s = s.dropna(subset=["date"])
+    # schedule_id が無い場合は job_id または name から引く
+    if "schedule_id" not in df.columns or df["schedule_id"].isna().all():
+        sch = con.execute("SELECT id AS schedule_id, name FROM schedules WHERE tenant=?", [TENANT]).df()
+        df["schedule_id"] = None
+        if "job_id" in df.columns:
+            # job_id = schedules.id と一致する想定
+            df.loc[df["schedule_id"].isna(), "schedule_id"] = df.loc[df["schedule_id"].isna(), "job_id"]
+        if "name" in df.columns and not sch.empty:
+            # name をキーに解決（前後空白無視）
+            m = df["schedule_id"].isna()
+            df.loc[m, "schedule_id"] = df.loc[m, "name"].astype(str).str.strip().map(
+                sch.set_index(sch["name"].astype(str).str.strip())["schedule_id"]
+            )
+
+    need = ["date","schedule_id","status"]
+    miss = [c for c in need if c not in df.columns]
+    if miss:
+        st.error(f"必須列が不足: {miss}")
+        st.write("受け取った列:", list(df.columns))
+        return
+
+    s = pd.DataFrame()
+    s["schedule_id"] = df["schedule_id"].astype(str).str.strip()
+    s["date"]        = pd.to_datetime(df["date"], errors="coerce").dt.date
+    s["status"]      = df["status"].astype(str).str.strip()
+
+    # 進捗（59/61 等）を分解
+    if "done" in df.columns and "total" in df.columns:
+        s["done"]  = pd.to_numeric(df["done"], errors="coerce")
+        s["total"] = pd.to_numeric(df["total"], errors="coerce")
+    else:
+        prog = df.get("progress")
+        if prog is not None and len(df)>0:
+            def split_prog(x):
+                xs = str(x).replace(" ", "")
+                if "/" in xs:
+                    a,b = xs.split("/",1)
+                    try:    return int(a or 0), int(b or 0)
+                    except: return None, None
+                return None, None
+            d,t = zip(*[split_prog(v) for v in prog])
+            s["done"], s["total"] = d, t
+
+    s["done_at"] = pd.to_datetime(df.get("done_at") or df.get("完了日時"), errors="coerce")
+
+    # schedule_id と date の欠損/空を除外
+    s = s.dropna(subset=["schedule_id","date"])
+    s = s[s["schedule_id"].astype(str).str.len() > 0]
+
     upsert_df("schedule_dates", s, ["schedule_id","date"])
-    st.success(f"チケット取込: {len(s)} 行")
+    st.success(f"チケット取込: {len(s)} 行（schedule_id 自動解決あり）")
+
 
 # ---- 取込：不具合（階層ヒントで device_id 自動解決） --------------------
 def import_issues(df: pd.DataFrame):
@@ -328,17 +443,41 @@ def render_analysis():
   tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📅 日報","🛠️ 設備","📈 月報","📄 ドキュメント","📥 取込","🤖 AIβ"])
   
   # 取込
-  with tab5:
-      st.subheader("CSV 取込")
-      f1 = st.file_uploader("マスタ（階層+設備+target+schedule）CSV", type=["csv"])
-      if f1: import_master(pd.read_csv(f1))
-      f2 = st.file_uploader("operation_tickets.csv（実施日/進捗）", type=["csv"])
-      if f2: import_tickets(pd.read_csv(f2))
-      f3 = st.file_uploader("issues.csv（不具合）", type=["csv"])
-      if f3: import_issues(pd.read_csv(f3))
-      f4 = st.file_uploader("点検結果（横持ち）CSV", type=["csv"])
-      if f4: import_results_wide(pd.read_csv(f4))
-      if st.button("KPI再計算"): recalc_daily_kpis(); st.success("daily_kpis 再計算")
+ # 取込
+with tab5:
+    st.subheader("CSV 取込")
+    st.caption("推奨順序：①マスタ → ②年間業務計画 → ③operation_tickets → ④issues → ⑤点検結果 → KPI再計算")
+
+    # ① マスタ（階層+設備+targets）— 既存のまま
+    f_master = st.file_uploader("マスタ（階層+設備+target）CSV", type=["csv"], key="upl_master")
+    if f_master:
+        import_master(pd.read_csv(f_master, encoding="utf-8-sig"))
+
+    # ② 年間業務計画（スケジュール定義／予定日）
+    f_plan = st.file_uploader("年間業務計画.csv（スケジュール定義/予定日）", type=["csv"], key="upl_plan")
+    if f_plan:
+        import_annual_plan(pd.read_csv(f_plan, encoding="utf-8-sig"))
+
+    # ③ 実施チケット（実施日/進捗）— schedule_id が無くても job_id/業務名から自動解決
+    f_tickets = st.file_uploader("operation_tickets.csv（実施日/進捗：schedule自動解決可）", type=["csv"], key="upl_tickets")
+    if f_tickets:
+        import_tickets(pd.read_csv(f_tickets, encoding="utf-8-sig"))
+
+    # ④ 不具合
+    f_issues = st.file_uploader("issues.csv（不具合）", type=["csv"], key="upl_issues")
+    if f_issues:
+        import_issues(pd.read_csv(f_issues, encoding="utf-8-sig"))
+
+    # ⑤ 点検結果（横持ち）
+    f_results = st.file_uploader("点検結果（横持ち）CSV", type=["csv"], key="upl_results")
+    if f_results:
+        import_results_wide(pd.read_csv(f_results, encoding="utf-8-sig"))
+
+    # KPI 再計算
+    if st.button("KPI再計算"):
+        recalc_daily_kpis()
+        st.success("daily_kpis 再計算")
+
   
   # 日報
   with tab1:
