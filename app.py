@@ -47,36 +47,40 @@ CREATE TABLE IF NOT EXISTS daily_kpis(tenant TEXT, date DATE, planned INT, done 
 TENANT = st.session_state.setdefault("tenant", "demo")
 
 # ---- 共通: 簡易アップサート ---------------------------------------------
-def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
+def upsert_df(table: str, df: pd.DataFrame, pk: list[str], *, replace_all: bool=False):
     if df.empty:
         return
     df = df.copy()
+
+    # 先にテナント列を付与
     df["tenant"] = TENANT
 
-    # PK を正規化 & 欠損/空を除外
+    # PK 正規化（空/None/"nan"→""）
     for k in pk:
         df[k] = df[k].apply(_norm)
-    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
-    bad = len(df) - int(mask_valid.sum())
-    if bad:
-        st.warning(f"{table}: PK欠損で {bad} 行をスキップ（空/NaN/None）")
-    df = df[mask_valid]
 
-    # PK 重複を折りたたみ
+    # 空PKは捨てる
+    for k in pk:
+        df = df[df[k].astype(str).str.len() > 0]
+
+    # 完全に同一PKの重複は落とす（最後を採用）
     before = len(df)
     df = df.drop_duplicates(subset=pk, keep="last")
-    dup = before - len(df)
-    if dup:
-        st.warning(f"{table}: PK重複で {dup} 行を折りたたみ")
+    dedup = before - len(df)
+    if dedup:
+        st.warning(f"{table}: PK重複 {dedup} 行を折りたたみました")
 
-    cols = list(df.columns)
-    for _, r in df.iterrows():
-        where = " AND ".join([f"{k} = ?" for k in ["tenant", *pk]])
-        con.execute(f"DELETE FROM {table} WHERE {where}", [TENANT, *[r[k] for k in pk]])
-        con.execute(
-            f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",
-            r.tolist()
-        )
+    # 必要ならテナント分を丸ごと消してから入れ直す
+    if replace_all:
+        con.execute(f"DELETE FROM {table} WHERE tenant=?", [TENANT])
+
+    cols = list(df.columns)  # ← tenant を含む
+    params = [tuple(r) for r in df[cols].itertuples(index=False, name=None)]
+    con.executemany(
+        f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",
+        params
+    )
+
 
 
 # ---- 便利：階層パスで一意な device_id を作る ----------------------------
@@ -150,10 +154,12 @@ def import_master(df: pd.DataFrame):
         st.warning(f"devices: 同一IDが {dup_dev} 行見つかりました（最後の1件に折りたたみ）")
     d = d.drop_duplicates(subset=["id"], keep="last")
     d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
-    upsert_df("devices",
-              d[["id","building_id","location_id","floor_id","room_id","name",
-                 "category_l","category_m","category_s","symbol","cmms_url_rule"]],
-              ["id"])
+    upsert_df(
+    "devices",
+    d[["id","building_id","location_id","floor_id","room_id","name",
+       "category_l","category_m","category_s","symbol","cmms_url_rule"]],
+    ["id"],
+    replace_all=True,   
 
     # ---------------- targets ----------------
     t = df[["building_name","location_name","floor_name","room_name","device_name",
