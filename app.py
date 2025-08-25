@@ -315,20 +315,36 @@ def import_tickets(df: pd.DataFrame):
                     df.rename(columns={a: canon}, inplace=True)
                     break
 
-    # schedule_id が無い場合は job_id または name から引く
-    if "schedule_id" not in df.columns or df["schedule_id"].isna().all():
-        sch = con.execute("SELECT id AS schedule_id, name FROM schedules WHERE tenant=?", [TENANT]).df()
+    # 1) schedule_id が無い/欠損の行だけ自動解決
+    if "schedule_id" not in df.columns:
         df["schedule_id"] = None
-        if "job_id" in df.columns:
-            # job_id = schedules.id と一致する想定
-            df.loc[df["schedule_id"].isna(), "schedule_id"] = df.loc[df["schedule_id"].isna(), "job_id"]
-        if "name" in df.columns and not sch.empty:
-            # name をキーに解決（前後空白無視）
-            m = df["schedule_id"].isna()
-            df.loc[m, "schedule_id"] = df.loc[m, "name"].astype(str).str.strip().map(
-                sch.set_index(sch["name"].astype(str).str.strip())["schedule_id"]
+
+    need_resolve = df["schedule_id"].isna() | (df["schedule_id"].astype(str).str.strip() == "")
+
+    # 1-1) job_id を優先採用（job_id = schedules.id 想定）
+    if "job_id" in df.columns:
+        df.loc[need_resolve, "schedule_id"] = df.loc[need_resolve, "job_id"]
+
+    # 1-2) name（業務名）→ schedules.name から引く（重複名は最後を採用）
+    still = df["schedule_id"].isna() | (df["schedule_id"].astype(str).str.strip() == "")
+    if still.any():
+        sch = con.execute(
+            "SELECT id AS schedule_id, name FROM schedules WHERE tenant=?",
+            [TENANT]
+        ).df()
+        if not sch.empty and "name" in df.columns:
+            sch_map = (
+                sch.assign(key=sch["name"].astype(str).str.strip())
+                   .dropna(subset=["key"])
+                   .drop_duplicates(subset=["key"], keep="last")  # ★重複名を畳む
+                   .set_index("key")["schedule_id"]
+                   .to_dict()
+            )
+            df.loc[still, "schedule_id"] = (
+                df.loc[still, "name"].astype(str).str.strip().map(sch_map)
             )
 
+    # 以降は従来通り
     need = ["date","schedule_id","status"]
     miss = [c for c in need if c not in df.columns]
     if miss:
@@ -341,7 +357,7 @@ def import_tickets(df: pd.DataFrame):
     s["date"]        = pd.to_datetime(df["date"], errors="coerce").dt.date
     s["status"]      = df["status"].astype(str).str.strip()
 
-    # 進捗（59/61 等）を分解
+    # 進捗（59/61 形式）
     if "done" in df.columns and "total" in df.columns:
         s["done"]  = pd.to_numeric(df["done"], errors="coerce")
         s["total"] = pd.to_numeric(df["total"], errors="coerce")
@@ -360,12 +376,17 @@ def import_tickets(df: pd.DataFrame):
 
     s["done_at"] = pd.to_datetime(df.get("done_at") or df.get("完了日時"), errors="coerce")
 
-    # schedule_id と date の欠損/空を除外
+    # schedule_id / date の欠損は落とす
+    before = len(s)
     s = s.dropna(subset=["schedule_id","date"])
     s = s[s["schedule_id"].astype(str).str.len() > 0]
+    dropped = before - len(s)
+    if dropped:
+        st.warning(f"schedule_id または date 欠損で {dropped} 行をスキップ")
 
     upsert_df("schedule_dates", s, ["schedule_id","date"])
-    st.success(f"チケット取込: {len(s)} 行（schedule_id 自動解決あり）")
+    st.success(f"チケット取込: {len(s)} 行（自動解決あり）")
+
 
 
 # ---- 取込：不具合（階層ヒントで device_id 自動解決） --------------------
