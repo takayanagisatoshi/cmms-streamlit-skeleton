@@ -48,33 +48,40 @@ TENANT = st.session_state.setdefault("tenant", "demo")
 
 # ---- 共通: 簡易アップサート ---------------------------------------------
 def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
-    if df.empty:
+    if df is None or df.empty:
         return
-    df = df.copy()
-    df["tenant"] = TENANT
 
-    # PKを正規化し、欠損/空を除外して重複を畳む
+    df = df.copy()
+
+    # tenant 付与＆列順をテーブル順に合わせる（tenant を先頭へ）
+    df["tenant"] = TENANT
+    cols = ["tenant"] + [c for c in df.columns if c != "tenant"]
+    df = df[cols]
+
+    # PK 正規化 ＆ 欠損/空PK 行は除外
     for k in pk:
         df[k] = df[k].apply(_norm)
-    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
-    df = df[mask_valid].drop_duplicates(subset=pk, keep="last")
+    valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
+    if not valid.all():
+        st.warning(f"{table}: PK欠損で {int((~valid).sum())} 行をスキップ")
+    df = df[valid]
 
-    cols = list(df.columns)
+    # バッチ内の重複PKは畳む（最後を採用）
+    before = len(df)
+    df = df.drop_duplicates(subset=pk, keep="last")
+    if len(df) != before:
+        st.warning(f"{table}: バッチ内のPK重複 {before-len(df)} 行を折りたたみ")
 
-    # 1) 既存行の削除（tenant + PK）
-    del_sql = (
-        f"DELETE FROM {table} WHERE tenant=? AND "
-        + " AND ".join([f"{k}=?" for k in pk])
-    )
-    del_params = [(TENANT, *[row[k] for k in pk]) for _, row in df.iterrows()]
-    if del_params:
-        con.executemany(del_sql, del_params)
-
-    # 2) 新規挿入
-    ins_sql = f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
-    ins_params = [tuple(row[c] for c in cols) for _, row in df.iterrows()]
-    if ins_params:
-        con.executemany(ins_sql, ins_params)
+    # --- セット型 UPSERT（DELETE … USING で消してから INSERT）---
+    con.register("tmp_upsert", df)  # pandas→DuckDB に一時登録
+    on_keys = " AND ".join([f"t.{k}=s.{k}" for k in pk])  # t=既存, s=一時
+    con.execute(f"""
+        DELETE FROM {table} AS t
+        USING tmp_upsert AS s
+        WHERE t.tenant = s.tenant AND {on_keys}
+    """)
+    con.execute(f"INSERT INTO {table} SELECT * FROM tmp_upsert")
+    con.unregister("tmp_upsert")
 
 
 
