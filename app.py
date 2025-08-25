@@ -47,39 +47,35 @@ CREATE TABLE IF NOT EXISTS daily_kpis(tenant TEXT, date DATE, planned INT, done 
 TENANT = st.session_state.setdefault("tenant", "demo")
 
 # ---- 共通: 簡易アップサート ---------------------------------------------
-def upsert_df(table: str, df: pd.DataFrame, pk: list[str], *, replace_all: bool=False):
+def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
     if df.empty:
         return
     df = df.copy()
-
-    # 先にテナント列を付与
     df["tenant"] = TENANT
 
-    # PK 正規化（空/None/"nan"→""）
+    # PKを正規化し、欠損/空を除外して重複を畳む
     for k in pk:
         df[k] = df[k].apply(_norm)
+    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
+    df = df[mask_valid].drop_duplicates(subset=pk, keep="last")
 
-    # 空PKは捨てる
-    for k in pk:
-        df = df[df[k].astype(str).str.len() > 0]
+    cols = list(df.columns)
 
-    # 完全に同一PKの重複は落とす（最後を採用）
-    before = len(df)
-    df = df.drop_duplicates(subset=pk, keep="last")
-    dedup = before - len(df)
-    if dedup:
-        st.warning(f"{table}: PK重複 {dedup} 行を折りたたみました")
-
-    # 必要ならテナント分を丸ごと消してから入れ直す
-    if replace_all:
-        con.execute(f"DELETE FROM {table} WHERE tenant=?", [TENANT])
-
-    cols = list(df.columns)  # ← tenant を含む
-    params = [tuple(r) for r in df[cols].itertuples(index=False, name=None)]
-    con.executemany(
-        f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})",
-        params
+    # 1) 既存行の削除（tenant + PK）
+    del_sql = (
+        f"DELETE FROM {table} WHERE tenant=? AND "
+        + " AND ".join([f"{k}=?" for k in pk])
     )
+    del_params = [(TENANT, *[row[k] for k in pk]) for _, row in df.iterrows()]
+    if del_params:
+        con.executemany(del_sql, del_params)
+
+    # 2) 新規挿入
+    ins_sql = f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+    ins_params = [tuple(row[c] for c in cols) for _, row in df.iterrows()]
+    if ins_params:
+        con.executemany(ins_sql, ins_params)
+
 
 
 
