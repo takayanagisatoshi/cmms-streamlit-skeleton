@@ -51,29 +51,26 @@ def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
     if df.empty:
         return
     df = df.copy()
+
+    # tenant 付与
     df["tenant"] = TENANT
 
-    # PK 正規化（空/NaN/None を除外）
+    # PK 正規化 → 空/NaN 除去 → PK 重複を最後の1件に
     for k in pk:
         df[k] = df[k].apply(_norm)
-    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
-    df = df[mask_valid].drop_duplicates(subset=pk, keep="last")
+    df = df[df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)]
+    df = df.drop_duplicates(subset=pk, keep="last").reset_index(drop=True)
 
-    # テーブル定義に存在する列だけに絞る（列順はこの順で固定）
+    # テーブルに実在する列だけ／順序はここで固定
     tbl_cols = con.execute(f"PRAGMA table_info('{table}')").df()["name"].tolist()
-    cols = [c for c in df.columns if c in tbl_cols]
+    # tenant を先頭にしておくと見通しが良い
+    cols = [c for c in (["tenant"] + [c for c in df.columns if c != "tenant"]) if c in tbl_cols]
 
-    # 先に DELETE（tenant + PK）をまとめて実行
-    del_sql = f"DELETE FROM {table} WHERE " + " AND ".join([f"{k}=?" for k in ["tenant", *pk]])
-    del_params = [(TENANT, *[r[k] for k in pk]) for _, r in df[pk].iterrows()]
-    if del_params:
-        con.executemany(del_sql, del_params)
+    # 不足列は None を入れて executemany
+    ins_sql = f"INSERT OR REPLACE INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+    params = [tuple(row[c] if c in df.columns else None for c in cols) for _, row in df.iterrows()]
+    con.executemany(ins_sql, params)
 
-    # 明示した列名で INSERT（不足列は DataFrame 側に作らずとも OK）
-    ins_sql = f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
-    ins_params = [tuple(r[c] for c in cols) for _, r in df[cols].iterrows()]
-    if ins_params:
-        con.executemany(ins_sql, ins_params)
 
 
 
@@ -168,15 +165,7 @@ def import_master(df: pd.DataFrame):
     # 追加属性（空でOK）
     d["category_l"]=d["category_m"]=d["category_s"]=d["symbol"]=d["cmms_url_rule"]=None
 
-    upsert_df(
-        "devices",
-        d[[
-            "id","building_id","location_id","floor_id","room_id","name",
-            "category_l","category_m","category_s","symbol","cmms_url_rule"
-        ]],
-        ["id"]
-    )
-
+    
     # ---------- targets ----------
     t = df[[
         "building_name","location_name","floor_name","room_name","device_name",
@@ -206,11 +195,7 @@ def import_master(df: pd.DataFrame):
         st.warning(f"targets: 同一 target_id が {dup_cnt} 行見つかりました（最後の1件で上書き）")
     t = t.drop_duplicates(subset=["id"], keep="last")
 
-    upsert_df(
-        "targets",
-        t[["id","device_id","name","input_type","unit","lower","upper","ord"]],
-        ["id"]
-    )
+    
 
     st.success(f"マスタ取込: {len(df)} 行（不足列は既定値で補完）")
 
