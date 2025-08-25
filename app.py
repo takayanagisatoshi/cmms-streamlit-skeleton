@@ -439,335 +439,276 @@ def recalc_daily_kpis():
 
 # ========================= UI =============================================
 def render_analysis():
-  st.title("分析・サマリー（β版）")
-  tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📅 日報","🛠️ 設備","📈 月報","📄 ドキュメント","📥 取込","🤖 AIβ"])
-  
-  # 取込
-with tab5:
-    st.subheader("CSV 取込")
-    st.caption("推奨順序：①マスタ → ②年間業務計画 → ③operation_tickets → ④issues → ⑤点検結果 → KPI再計算")
+    st.title("分析・サマリー（β版）")
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["📅 日報", "🛠️ 設備", "📈 月報", "📄 ドキュメント", "📥 取込", "🤖 AIβ"]
+    )
 
-    # ① マスタ（階層+設備+targets）— 既存のまま
-    f_master = st.file_uploader("マスタ（階層+設備+target）CSV", type=["csv"], key="upl_master")
-    if f_master:
-        import_master(pd.read_csv(f_master, encoding="utf-8-sig"))
+    # ===== 取込 =========================================================
+    with tab5:
+        st.subheader("CSV 取込")
+        st.caption("推奨順序：①マスタ → ②年間業務計画 → ③operation_tickets → ④issues → ⑤点検結果 → KPI再計算")
 
-    # ② 年間業務計画（スケジュール定義／予定日）
-    f_plan = st.file_uploader("年間業務計画.csv（スケジュール定義/予定日）", type=["csv"], key="upl_plan")
-    if f_plan:
-        import_annual_plan(pd.read_csv(f_plan, encoding="utf-8-sig"))
+        f_master = st.file_uploader("マスタ（階層+設備+target）CSV", type=["csv"], key="upl_master")
+        if f_master:
+            import_master(pd.read_csv(f_master, encoding="utf-8-sig"))
 
-    # ③ 実施チケット（実施日/進捗）— schedule_id が無くても job_id/業務名から自動解決
-    f_tickets = st.file_uploader("operation_tickets.csv（実施日/進捗：schedule自動解決可）", type=["csv"], key="upl_tickets")
-    if f_tickets:
-        import_tickets(pd.read_csv(f_tickets, encoding="utf-8-sig"))
+        f_plan = st.file_uploader("年間業務計画.csv（スケジュール定義/予定日）", type=["csv"], key="upl_plan")
+        if f_plan:
+            import_annual_plan(pd.read_csv(f_plan, encoding="utf-8-sig"))
 
-    # ④ 不具合
-    f_issues = st.file_uploader("issues.csv（不具合）", type=["csv"], key="upl_issues")
-    if f_issues:
-        import_issues(pd.read_csv(f_issues, encoding="utf-8-sig"))
+        f_tickets = st.file_uploader("operation_tickets.csv（実施日/進捗：schedule自動解決可）", type=["csv"], key="upl_tickets")
+        if f_tickets:
+            import_tickets(pd.read_csv(f_tickets, encoding="utf-8-sig"))
 
-    # ⑤ 点検結果（横持ち）
-    f_results = st.file_uploader("点検結果（横持ち）CSV", type=["csv"], key="upl_results")
-    if f_results:
-        import_results_wide(pd.read_csv(f_results, encoding="utf-8-sig"))
+        f_issues = st.file_uploader("issues.csv（不具合）", type=["csv"], key="upl_issues")
+        if f_issues:
+            import_issues(pd.read_csv(f_issues, encoding="utf-8-sig"))
 
-    # KPI 再計算
-    if st.button("KPI再計算"):
-        recalc_daily_kpis()
-        st.success("daily_kpis 再計算")
+        f_results = st.file_uploader("点検結果（横持ち）CSV", type=["csv"], key="upl_results")
+        if f_results:
+            import_results_wide(pd.read_csv(f_results, encoding="utf-8-sig"))
 
-  
-  # 日報
-  with tab1:
-      st.subheader("本日の業務予定と進捗")
-      target_date = st.date_input("対象日", value=date.today())
-      kpi = con.execute(
-          "SELECT planned, done, overdue FROM daily_kpis WHERE tenant=? AND date=?",
-          [TENANT, target_date]).fetchone()
-      planned, done, overdue = (kpi if kpi else (0,0,0))
-      c1,c2,c3 = st.columns(3); c1.metric("予定", planned); c2.metric("完了", done); c3.metric("期限超過", overdue)
-      df = con.execute("SELECT * FROM schedule_dates WHERE tenant=? AND date=?", [TENANT, target_date]).df()
-      st.dataframe(df, use_container_width=True)
-  
-      st.subheader("本日発生の不具合")
-      issues = con.execute("SELECT * FROM issues WHERE tenant=? AND reported_on=?", [TENANT, target_date]).df()
-      st.dataframe(issues, use_container_width=True)
-  
-  # 設備
-  with tab2:
-      st.title("🛠️ 設備ページ")
-  
-      # 段階選択（物件→棟→フロア→部屋→設備）
-      blds = con.execute("SELECT DISTINCT building_id FROM devices WHERE tenant=?", [TENANT]).df()["building_id"].tolist()
-      if not blds:
-          st.info("まずは『📥 取込』からマスタCSVを投入してください。"); st.stop()
-      bld = st.selectbox("物件", blds)
-  
-      locs = con.execute(
-          "SELECT DISTINCT location_id FROM devices WHERE tenant=? AND building_id=?",
-          [TENANT, bld]).df()["location_id"].tolist()
-      loc = st.selectbox("棟", locs) if locs else None
-  
-      flrs = con.execute(
-          "SELECT DISTINCT floor_id FROM devices WHERE tenant=? AND building_id=? AND location_id=?",
-          [TENANT, bld, loc]).df()["floor_id"].tolist() if loc else []
-      flr = st.selectbox("フロア", flrs) if flrs else None
-  
-      rooms = con.execute(
-          "SELECT DISTINCT room_id FROM devices WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=?",
-          [TENANT, bld, loc, flr]).df()["room_id"].tolist() if flr else []
-      room = st.selectbox("部屋", rooms) if rooms else None
-  
-      devs = con.execute(
-          """SELECT id,name FROM devices
-             WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=? AND room_id=?""",
-          [TENANT, bld, loc, flr, room]).df() if room else pd.DataFrame(columns=["id","name"])
-      dev = st.selectbox("設備", options=devs["id"] if not devs.empty else [])
-      if not dev:
-          st.stop()
-  
-      meta = con.execute("SELECT * FROM devices WHERE tenant=? AND id=?", [TENANT, dev]).df().iloc[0]
-      st.markdown(f"### {meta['name']}　〔{bld} / {loc} / {flr} / {room}〕")
-      if pd.notna(meta.get("cmms_url_rule")) and str(meta.get("cmms_url_rule")) not in ("", "None"):
-          st.link_button("CMMSで開く", str(meta["cmms_url_rule"]))
-  
-      # 期間
-      dr = st.date_input("期間", [])
-      if len(dr) != 2:
-          st.info("期間を選択すると、グラフと表が表示されます。"); st.stop()
-  
-      # 点検結果（targets と閾値を JOIN）
-      q = """
-        SELECT r.date, r.target_id, r.value_num, r.value_text,
-               t.name AS target_name, t.unit, t.lower, t.upper
-        FROM results r
-        JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
-        WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ?
-        ORDER BY r.date
-      """
-      df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
-      if df.empty:
-          st.warning("期間内のデータがありません。"); st.stop()
-  
-      df["date"] = pd.to_datetime(df["date"])
-      # 異常（閾値逸脱 or ×/NG）
-      abnormal_mask = (
-          (df["value_num"].notna() & (
-              (df["lower"].notna() & (df["value_num"] < df["lower"])) |
-              (df["upper"].notna() & (df["value_num"] > df["upper"]))
-          )) |
-          (df["value_num"].isna() & df["value_text"].isin(["×","NG"]))
-      )
-      c1, c2, c3 = st.columns(3)
-      c1.metric("対象項目", int(df["target_id"].nunique()))
-      c2.metric("データ点数", int(df.shape[0]))
-      c3.metric("異常件数", int(abnormal_mask.sum()))
-  
-      # 五感のスコア化
-      label_to_score = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "×":2, "NG":2, "異常":2}
-      num  = df.dropna(subset=["value_num"]).copy()
-      qual = df[df["value_num"].isna()].copy()
-      qual["score"] = qual["value_text"].map(label_to_score).fillna(np.nan)
-  
-      # ヒートマップ用データ
-      if not qual.empty:
-          heat = (qual.pivot_table(index="target_name", columns="date", values="score", aggfunc="max")
-                  .sort_index())
-      else:
-          heat = pd.DataFrame(index=[], columns=[])
-  
-      # 同一時間軸の複合図
-     
-    # ---- 数値ライン + ×/△ 背景シェード（同一時間軸・右軸をUIで選択） ----
-      df["date"] = pd.to_datetime(df["date"], errors="coerce")
-      num  = df.dropna(subset=["value_num"]).copy()
-      qual = df[df["value_num"].isna()].copy()
-      
-      # 五感→sev(0=OK,1=△,2=×)
-      sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "▲":1, "×":2, "NG":2, "異常":2}
-      if "sev" not in qual.columns:
-          qual["sev"] = qual["value_text"].map(sev_map).astype("float")
-      qual["date"] = pd.to_datetime(qual["date"], errors="coerce")
-      
-      # 背景シェード対象の選択
-      qual_targets_all = sorted(qual["target_name"].dropna().unique().tolist())
-      default_sel = sorted(qual.loc[qual["sev"]==2, "target_name"].dropna().unique().tolist()) or qual_targets_all
-      sel_targets = st.multiselect("背景色の対象（五感項目）", qual_targets_all, default=default_sel)
-      shade_x     = st.checkbox("×の発生日で背景色", value=True)
-      shade_tri   = st.checkbox("△の発生日も背景色に含める", value=False)
-      shade_alpha = st.slider("背景の濃さ", 0.05, 0.4, 0.12, 0.01)
-      
-      qual_sel  = qual[qual["target_name"].isin(sel_targets)] if len(sel_targets) else qual.iloc[0:0]
-      bad_days  = pd.to_datetime(qual_sel.loc[qual_sel["sev"]>=2, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_x else []
-      warn_days = pd.to_datetime(qual_sel.loc[qual_sel["sev"]==1, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_tri else []
-      
-      # 右軸に出すシリーズを選択（単位欠損でもOK）
-      series = (num.groupby("target_name")
-                  .agg(unit=("unit", lambda s: next((u for u in s if pd.notna(u) and str(u) not in ["nan","None",""]), "")))
-                  .reset_index())
-      
-      KW_RIGHT = ("圧力","差圧","圧","MPa","kPa","電圧","V")  # 初期候補
-      suggest_right = [row.target_name for row in series.itertuples(index=False)
-                       if any(k in row.target_name for k in KW_RIGHT)]
-      right_targets = st.multiselect("右軸にする項目（圧力・電圧など）",
-                                     series["target_name"].tolist(), default=suggest_right)
-      
-      from plotly.subplots import make_subplots
-      import plotly.graph_objects as go
-      fig = make_subplots(specs=[[{"secondary_y": True}]])
-      
-      # 数値トレース
-      for tname, g in num.groupby("target_name"):
-          unit_label = series.loc[series["target_name"]==tname, "unit"].iloc[0]
-          fig.add_trace(
-              go.Scatter(x=g["date"], y=g["value_num"], mode="lines+markers",
-                         name=tname, hovertemplate="%{x|%Y-%m-%d}<br>%{y} "+(unit_label or "")),
-              secondary_y=(tname in right_targets)
-          )
-      
-      # 背景シェード
-      for d in warn_days:
-          fig.add_vrect(x0=d, x1=d, fillcolor="#FFD166", opacity=shade_alpha, line_width=0)
-      for d in bad_days:
-          fig.add_vrect(x0=d, x1=d, fillcolor="#EF476F", opacity=min(shade_alpha+0.05, 0.5), line_width=0)
-      
-      # 上部マーカー
-      if st.checkbox("×/△ を上部に記号表示", value=True):
-          for d in bad_days:
-              fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="×", showarrow=False,
-                                 font=dict(color="#EF476F", size=14))
-          for d in warn_days:
-              fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="▲", showarrow=False,
-                                 font=dict(color="#FFD166", size=12))
-      
-      # 軸タイトル（←スクショで left_label が「右軸」になってたので直してね）
-      left_units  = series.loc[~series["target_name"].isin(right_targets), "unit"].unique().tolist()
-      right_units = series.loc[ series["target_name"].isin(right_targets), "unit"].unique().tolist()
-      left_label  = " / ".join([u for u in left_units  if u]) or "左軸"
-      right_label = " / ".join([u for u in right_units if u]) or "右軸"
-      fig.update_yaxes(title_text=left_label,  secondary_y=False)
-      fig.update_yaxes(title_text=right_label, secondary_y=True)
-      
-      fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
-      st.plotly_chart(fig, use_container_width=True)
-  
-      
-      # --- 下：イベント（五感）一覧 ---
-      if not qual.empty:
-          show = qual_sel.copy() if len(sel_targets) else qual.copy()
-          col1, col2 = st.columns(2)
-          f_bad = col1.checkbox("×のみ表示", value=False)
-          f_tri = col2.checkbox("△のみ表示", value=False)
-          if f_bad: show = show[show["sev"]==2]
-          if f_tri: show = show[show["sev"]==1]
-          st.dataframe(
-              show.sort_values(["date","target_name"])[["date","target_name","value_text"]]
-                  .rename(columns={"date":"日付","target_name":"項目","value_text":"判定"}),
-              use_container_width=True
-          )
-  
-  
-      # 上段：数値ライン
-      for name, g in num.groupby("target_name"):
-          u = str(g["unit"].iloc[0] if "unit" in g else "")
-          fig.add_trace(
-              go.Scatter(x=g["date"], y=g["value_num"], mode="lines+markers",
-                         name=str(name), hovertemplate="%{x|%Y-%m-%d}<br>%{y} "+u),
-              row=1, col=1
-          )
-      # 異常日の縦帯
-      # 五感スコア列を用意（なければ作成）
-      if "sev" not in qual.columns:
-          sev_map = {"○":0, "OK":0, "良":0, "△":1, "要確認":1, "注意":1, "▲":1, "×":2, "NG":2, "異常":2}
-          qual["sev"] = qual["value_text"].map(sev_map).astype("float")
-      
-      # 異常日の縦帯（×/NGなど sev>=2）
-      bad_days = (
-          pd.to_datetime(qual.loc[qual["sev"] >= 2, "date"], errors="coerce")
-            .dt.normalize().dropna().unique()
-      )
-      
-      warn_days = (
-          pd.to_datetime(qual.loc[qual["sev"] == 1, "date"], errors="coerce")
-            .dt.normalize().dropna().unique()
-      )
-  for d in warn_days:
-      fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="#FFD166", opacity=0.10, line_width=0)
-  
-  for d in bad_days:
-      fig.add_vrect(x0=d, x1=d, row="all", col=1, fillcolor="red", opacity=0.08, line_width=0)
-      # 下段：五感ヒートマップ
-      if not heat.empty:
-          colorscale = [[0.0, "#3CB371"], [0.5, "#FFD166"], [1.0, "#EF476F"]]  # 0=緑,1=黄,2=赤
-          fig.add_trace(
-              go.Heatmap(z=heat.values, x=heat.columns, y=heat.index,
-                         zmin=0, zmax=2, colorscale=colorscale, colorbar=dict(title=""),
-                         hovertemplate="%{y}<br>%{x|%Y-%m-%d}<br>状態=%{z}<extra></extra>"),
-              row=2, col=1
-          )
-      fig.update_layout(height=700, margin=dict(l=10,r=10,t=40,b=10))
-      fig.update_xaxes(matches="x", row=1, col=1)
-      st.plotly_chart(fig, use_container_width=True)
-  
-      # 数値要約表
-      if not num.empty:
-          latest = num.sort_values("date").groupby("target_name").tail(1).set_index("target_name")[["value_num","unit"]]
-          stats = num.groupby("target_name")["value_num"].agg(最小="min", 最大="max", 平均="mean")
-          summary = latest.join(stats, how="left").rename(columns={"value_num":"最新値"})
-          st.markdown("**数値ターゲットの要約**")
-          st.dataframe(summary.reset_index(), use_container_width=True)
-  
-      # 五感テーブル
-      if not qual.empty:
-          st.markdown("**五感/選択ターゲット（表）**")
-          st.dataframe(
-              qual.pivot_table(index="date", columns="target_name", values="value_text", aggfunc="first"),
-              use_container_width=True
-          )
-  
-      # この設備の不具合
-      st.subheader("この設備に紐づく不具合")
-      iss = con.execute(
-          """SELECT id, reported_on, due_on, status, severity, category, summary
-             FROM issues WHERE tenant=? AND device_id=?
-             ORDER BY COALESCE(due_on, reported_on) DESC""",
-          [TENANT, dev]).df()
-      c1, c2, c3 = st.columns(3)
-      if iss.empty:
-          c1.metric("未完了", 0); c2.metric("期限超過", 0); c3.metric("今月新規", 0)
-          st.info("紐づく不具合はありません。")
-      else:
-          not_done = ~iss["status"].isin(["完了","対応済"])
-          overdue = pd.to_datetime(iss["due_on"], errors="coerce") < pd.Timestamp.today()
-          this_month = pd.to_datetime(iss["reported_on"], errors="coerce").dt.to_period("M") == pd.Timestamp.today().to_period("M")
-          c1.metric("未完了", int(iss[not_done].shape[0]))
-          c2.metric("期限超過", int(iss[not_done & overdue].shape[0]))
-          c3.metric("今月新規", int(iss[this_month].shape[0]))
-          st.dataframe(iss, use_container_width=True)
-  
-      # ドキュメント
-      st.subheader("ドキュメント")
-      docs = con.execute(
-          """SELECT d.id, d.title, d.category, d.tags, d.ai_summary
-             FROM document_bindings b
-             JOIN documents d ON d.tenant=b.tenant AND d.id=b.doc_id
-             WHERE b.tenant=? AND b.entity_type='device' AND b.entity_id=?
-             ORDER BY d.uploaded_at DESC""",
-          [TENANT, dev]).df()
-      if docs.empty:
-          st.info("この設備に紐づくドキュメントは未登録です。")
-      else:
-          st.dataframe(docs, use_container_width=True)
-  
-      # ターゲット定義
-      st.subheader("点検項目（Targets 定義）")
-      tl = con.execute(
-          """SELECT id AS target_id, name, input_type, unit, lower, upper, ord
-             FROM targets WHERE tenant=? AND device_id=? ORDER BY ord""",
-          [TENANT, dev]).df()
-      st.dataframe(tl, use_container_width=True)
+        if st.button("KPI再計算"):
+            recalc_daily_kpis()
+            st.success("daily_kpis 再計算")
+
+    # ===== 日報 =========================================================
+    with tab1:
+        st.subheader("本日の業務予定と進捗")
+        target_date = st.date_input("対象日", value=date.today())
+        kpi = con.execute(
+            "SELECT planned, done, overdue FROM daily_kpis WHERE tenant=? AND date=?",
+            [TENANT, target_date]
+        ).fetchone()
+        planned, done, overdue = (kpi if kpi else (0, 0, 0))
+        c1, c2, c3 = st.columns(3)
+        c1.metric("予定", planned); c2.metric("完了", done); c3.metric("期限超過", overdue)
+
+        st.dataframe(
+            con.execute("SELECT * FROM schedule_dates WHERE tenant=? AND date=?",
+                        [TENANT, target_date]).df(),
+            use_container_width=True
+        )
+
+        st.subheader("本日発生の不具合")
+        st.dataframe(
+            con.execute("SELECT * FROM issues WHERE tenant=? AND reported_on=?",
+                        [TENANT, target_date]).df(),
+            use_container_width=True
+        )
+
+    # ===== 設備 =========================================================
+    with tab2:
+        st.title("🛠️ 設備ページ")
+
+        # 段階選択
+        blds = con.execute("SELECT DISTINCT building_id FROM devices WHERE tenant=?", [TENANT]).df()["building_id"].tolist()
+        if not blds:
+            st.info("まずは『📥 取込』からマスタCSVを投入してください。")
+            st.stop()
+        bld = st.selectbox("物件", blds)
+
+        locs = con.execute(
+            "SELECT DISTINCT location_id FROM devices WHERE tenant=? AND building_id=?", [TENANT, bld]
+        ).df()["location_id"].tolist()
+        loc = st.selectbox("棟", locs) if locs else None
+
+        flrs = con.execute(
+            "SELECT DISTINCT floor_id FROM devices WHERE tenant=? AND building_id=? AND location_id=?",
+            [TENANT, bld, loc]
+        ).df()["floor_id"].tolist() if loc else []
+        flr = st.selectbox("フロア", flrs) if flrs else None
+
+        rooms = con.execute(
+            "SELECT DISTINCT room_id FROM devices WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=?",
+            [TENANT, bld, loc, flr]
+        ).df()["room_id"].tolist() if flr else []
+        room = st.selectbox("部屋", rooms) if rooms else None
+
+        devs = con.execute(
+            """SELECT id,name FROM devices
+               WHERE tenant=? AND building_id=? AND location_id=? AND floor_id=? AND room_id=?""",
+            [TENANT, bld, loc, flr, room]
+        ).df() if room else pd.DataFrame(columns=["id", "name"])
+        dev = st.selectbox("設備", options=devs["id"] if not devs.empty else [])
+        if not dev:
+            st.stop()
+
+        meta = con.execute("SELECT * FROM devices WHERE tenant=? AND id=?", [TENANT, dev]).df().iloc[0]
+        st.markdown(f"### {meta['name']}　〔{bld} / {loc} / {flr} / {room}〕")
+        if pd.notna(meta.get("cmms_url_rule")) and str(meta.get("cmms_url_rule")) not in ("", "None"):
+            st.link_button("CMMSで開く", str(meta["cmms_url_rule"]))
+
+        # 期間
+        dr = st.date_input("期間", [])
+        if len(dr) != 2:
+            st.info("期間を選択すると、グラフと表が表示されます。")
+            st.stop()
+
+        # データ取得
+        q = """
+          SELECT r.date, r.target_id, r.value_num, r.value_text,
+                 t.name AS target_name, t.unit, t.lower, t.upper
+          FROM results r
+          JOIN targets t ON t.tenant=r.tenant AND t.id=r.target_id
+          WHERE r.tenant=? AND t.device_id=? AND r.date BETWEEN ? AND ?
+          ORDER BY r.date
+        """
+        df = con.execute(q, [TENANT, dev, dr[0], dr[1]]).df()
+        if df.empty:
+            st.warning("期間内のデータがありません。")
+            st.stop()
+
+        df["date"] = pd.to_datetime(df["date"])
+        abnormal_mask = (
+            (df["value_num"].notna() & (
+                (df["lower"].notna() & (df["value_num"] < df["lower"])) |
+                (df["upper"].notna() & (df["value_num"] > df["upper"]))
+            )) |
+            (df["value_num"].isna() & df["value_text"].isin(["×", "NG"]))
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.metric("対象項目", int(df["target_id"].nunique()))
+        c2.metric("データ点数", int(df.shape[0]))
+        c3.metric("異常件数", int(abnormal_mask.sum()))
+
+        # スコア化・系列/背景指定
+        label_to_score = {"○": 0, "OK": 0, "良": 0, "△": 1, "要確認": 1, "注意": 1, "▲": 1, "×": 2, "NG": 2, "異常": 2}
+        num  = df.dropna(subset=["value_num"]).copy()
+        qual = df[df["value_num"].isna()].copy()
+        qual["sev"] = qual["value_text"].map(label_to_score).astype("float")
+
+        qual_targets_all = sorted(qual["target_name"].dropna().unique().tolist())
+        default_sel = sorted(qual.loc[qual["sev"] == 2, "target_name"].dropna().unique().tolist()) or qual_targets_all
+        sel_targets = st.multiselect("背景色の対象（五感項目）", qual_targets_all, default=default_sel)
+        shade_x     = st.checkbox("×の発生日で背景色", value=True)
+        shade_tri   = st.checkbox("△の発生日も背景色に含める", value=False)
+        shade_alpha = st.slider("背景の濃さ", 0.05, 0.4, 0.12, 0.01)
+
+        qual_sel  = qual[qual["target_name"].isin(sel_targets)] if len(sel_targets) else qual.iloc[0:0]
+        bad_days  = pd.to_datetime(qual_sel.loc[qual_sel["sev"] >= 2, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_x else []
+        warn_days = pd.to_datetime(qual_sel.loc[qual_sel["sev"] == 1, "date"], errors="coerce").dt.normalize().dropna().unique() if shade_tri else []
+
+        series = (num.groupby("target_name")
+                    .agg(unit=("unit", lambda s: next((u for u in s if pd.notna(u) and str(u) not in ["nan", "None", ""]), "")))
+                    .reset_index())
+
+        KW_RIGHT = ("圧力", "差圧", "圧", "MPa", "kPa", "電圧", "V")
+        suggest_right = [row.target_name for row in series.itertuples(index=False)
+                         if any(k in row.target_name for k in KW_RIGHT)]
+        right_targets = st.multiselect("右軸にする項目（圧力・電圧など）",
+                                       series["target_name"].tolist(), default=suggest_right)
+
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+        for tname, g in num.groupby("target_name"):
+            unit_label = series.loc[series["target_name"] == tname, "unit"].iloc[0]
+            fig.add_trace(
+                go.Scatter(x=g["date"], y=g["value_num"], mode="lines+markers",
+                           name=tname, hovertemplate="%{x|%Y-%m-%d}<br>%{y} " + (unit_label or "")),
+                secondary_y=(tname in right_targets)
+            )
+
+        for d in warn_days:
+            fig.add_vrect(x0=d, x1=d, fillcolor="#FFD166", opacity=shade_alpha, line_width=0)
+        for d in bad_days:
+            fig.add_vrect(x0=d, x1=d, fillcolor="#EF476F", opacity=min(shade_alpha + 0.05, 0.5), line_width=0)
+
+        if st.checkbox("×/△ を上部に記号表示", value=True):
+            for d in bad_days:
+                fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="×", showarrow=False,
+                                   font=dict(color="#EF476F", size=14))
+            for d in warn_days:
+                fig.add_annotation(x=d, y=1.02, xref="x", yref="paper", text="▲", showarrow=False,
+                                   font=dict(color="#FFD166", size=12))
+
+        left_units  = series.loc[~series["target_name"].isin(right_targets), "unit"].unique().tolist()
+        right_units = series.loc[ series["target_name"].isin(right_targets), "unit"].unique().tolist()
+        left_label  = " / ".join([u for u in left_units  if u]) or "左軸"
+        right_label = " / ".join([u for u in right_units if u]) or "右軸"
+        fig.update_yaxes(title_text=left_label,  secondary_y=False)
+        fig.update_yaxes(title_text=right_label, secondary_y=True)
+
+        fig.update_layout(height=520, margin=dict(l=10, r=10, t=30, b=10),
+                          legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 下：イベント（五感）一覧
+        if not qual.empty:
+            show = qual_sel.copy() if len(sel_targets) else qual.copy()
+            col1, col2 = st.columns(2)
+            f_bad = col1.checkbox("×のみ表示", value=False)
+            f_tri = col2.checkbox("△のみ表示", value=False)
+            if f_bad: show = show[show["sev"] == 2]
+            if f_tri: show = show[show["sev"] == 1]
+            st.dataframe(
+                show.sort_values(["date", "target_name"])[["date", "target_name", "value_text"]]
+                    .rename(columns={"date": "日付", "target_name": "項目", "value_text": "判定"}),
+                use_container_width=True
+            )
+
+        # この設備の不具合
+        st.subheader("この設備に紐づく不具合")
+        iss = con.execute(
+            """SELECT id, reported_on, due_on, status, severity, category, summary
+               FROM issues WHERE tenant=? AND device_id=?
+               ORDER BY COALESCE(due_on, reported_on) DESC""",
+            [TENANT, dev]
+        ).df()
+        c1, c2, c3 = st.columns(3)
+        if iss.empty:
+            c1.metric("未完了", 0); c2.metric("期限超過", 0); c3.metric("今月新規", 0)
+            st.info("紐づく不具合はありません。")
+        else:
+            not_done = ~iss["status"].isin(["完了", "対応済"])
+            overdue = pd.to_datetime(iss["due_on"], errors="coerce") < pd.Timestamp.today()
+            this_month = pd.to_datetime(iss["reported_on"], errors="coerce").dt.to_period("M") == pd.Timestamp.today().to_period("M")
+            c1.metric("未完了", int(iss[not_done].shape[0]))
+            c2.metric("期限超過", int(iss[not_done & overdue].shape[0]))
+            c3.metric("今月新規", int(iss[this_month].shape[0]))
+            st.dataframe(iss, use_container_width=True)
+
+        # ドキュメント
+        st.subheader("ドキュメント")
+        docs = con.execute(
+            """SELECT d.id, d.title, d.category, d.tags, d.ai_summary
+               FROM document_bindings b
+               JOIN documents d ON d.tenant=b.tenant AND d.id=b.doc_id
+               WHERE b.tenant=? AND b.entity_type='device' AND b.entity_id=?
+               ORDER BY d.uploaded_at DESC""",
+            [TENANT, dev]
+        ).df()
+        if docs.empty:
+            st.info("この設備に紐づくドキュメントは未登録です。")
+        else:
+            st.dataframe(docs, use_container_width=True)
+
+        # ターゲット定義
+        st.subheader("点検項目（Targets 定義）")
+        tl = con.execute(
+            """SELECT id AS target_id, name, input_type, unit, lower, upper, ord
+               FROM targets WHERE tenant=? AND device_id=? ORDER BY ord""",
+            [TENANT, dev]
+        ).df()
+        st.dataframe(tl, use_container_width=True)
+
+    # ===== 月報/ドキュメント/AI（プレースホルダ） =========================
+    with tab3:
+        st.subheader("指定月のサマリー（プレースホルダ）")
+        st.info("CSV取込後、月次集計を実装します。")
+
+    with tab4:
+        st.subheader("ドキュメント一覧（プレースホルダ）")
+        docs = con.execute("SELECT id,title,category,tags,ai_summary FROM documents WHERE tenant=?", [TENANT]).df()
+        st.dataframe(docs, use_container_width=True)
+
+    with tab6:
+        st.subheader("AIサマリー（β）")
+        st.info("OCR/AI連携は後で接続。まずはCSV→ダッシュボードの流れを固めます。")
+
+    st.caption("Theme: 管理ロイド風 / データは UTF-8 CSV を 取込タブから投入")
+
   
   # 月報（プレースホルダ）
   with tab3:
