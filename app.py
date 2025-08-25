@@ -48,40 +48,33 @@ TENANT = st.session_state.setdefault("tenant", "demo")
 
 # ---- 共通: 簡易アップサート ---------------------------------------------
 def upsert_df(table: str, df: pd.DataFrame, pk: list[str]):
-    if df is None or df.empty:
+    if df.empty:
         return
-
     df = df.copy()
-
-    # tenant 付与＆列順をテーブル順に合わせる（tenant を先頭へ）
     df["tenant"] = TENANT
-    cols = ["tenant"] + [c for c in df.columns if c != "tenant"]
-    df = df[cols]
 
-    # PK 正規化 ＆ 欠損/空PK 行は除外
+    # PK 正規化（空/NaN/None を除外）
     for k in pk:
         df[k] = df[k].apply(_norm)
-    valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
-    if not valid.all():
-        st.warning(f"{table}: PK欠損で {int((~valid).sum())} 行をスキップ")
-    df = df[valid]
+    mask_valid = df[pk].apply(lambda s: s.astype(str).str.len() > 0).all(axis=1)
+    df = df[mask_valid].drop_duplicates(subset=pk, keep="last")
 
-    # バッチ内の重複PKは畳む（最後を採用）
-    before = len(df)
-    df = df.drop_duplicates(subset=pk, keep="last")
-    if len(df) != before:
-        st.warning(f"{table}: バッチ内のPK重複 {before-len(df)} 行を折りたたみ")
+    # テーブル定義に存在する列だけに絞る（列順はこの順で固定）
+    tbl_cols = con.execute(f"PRAGMA table_info('{table}')").df()["name"].tolist()
+    cols = [c for c in df.columns if c in tbl_cols]
 
-    # --- セット型 UPSERT（DELETE … USING で消してから INSERT）---
-    con.register("tmp_upsert", df)  # pandas→DuckDB に一時登録
-    on_keys = " AND ".join([f"t.{k}=s.{k}" for k in pk])  # t=既存, s=一時
-    con.execute(f"""
-        DELETE FROM {table} AS t
-        USING tmp_upsert AS s
-        WHERE t.tenant = s.tenant AND {on_keys}
-    """)
-    con.execute(f"INSERT INTO {table} SELECT * FROM tmp_upsert")
-    con.unregister("tmp_upsert")
+    # 先に DELETE（tenant + PK）をまとめて実行
+    del_sql = f"DELETE FROM {table} WHERE " + " AND ".join([f"{k}=?" for k in ["tenant", *pk]])
+    del_params = [(TENANT, *[r[k] for k in pk]) for _, r in df[pk].iterrows()]
+    if del_params:
+        con.executemany(del_sql, del_params)
+
+    # 明示した列名で INSERT（不足列は DataFrame 側に作らずとも OK）
+    ins_sql = f"INSERT INTO {table}({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})"
+    ins_params = [tuple(r[c] for c in cols) for _, r in df[cols].iterrows()]
+    if ins_params:
+        con.executemany(ins_sql, ins_params)
+
 
 
 
