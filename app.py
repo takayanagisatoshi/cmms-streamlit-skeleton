@@ -710,23 +710,6 @@ def render_analysis():
     st.caption("Theme: 管理ロイド風 / データは UTF-8 CSV を 取込タブから投入")
 
   
-  # 月報（プレースホルダ）
-  with tab3:
-      st.subheader("指定月のサマリー（プレースホルダ）")
-      st.info("CSV取込後、月次集計を実装します。")
-  
-  # ドキュメント（プレースホルダ）
-  with tab4:
-      st.subheader("ドキュメント一覧（プレースホルダ）")
-      docs = con.execute("SELECT id,title,category,tags,ai_summary FROM documents WHERE tenant=?", [TENANT]).df()
-      st.dataframe(docs, use_container_width=True)
-  
-  # AI（プレースホルダ）
-  with tab6:
-      st.subheader("AIサマリー（β）")
-      st.info("OCR/AI連携は後で接続。まずはCSV→ダッシュボードの流れを固めます。")
-  
-  st.caption("Theme: 管理ロイド風 / データは UTF-8 CSV を 取込タブから投入")
 
 import streamlit as st
 import streamlit.components.v1 as components
