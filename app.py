@@ -501,91 +501,81 @@ def recalc_daily_kpis():
 # ========================= UI =============================================
 def render_analysis():
     st.title("分析・サマリー（β版）")
+
+    # ★タブをここで作成（この行と同じインデント階層で with tabX: を並べます）
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        ["📅 日報", "🛠️ 設備", "📈 月報", "📄 ドキュメント", "📥 取込", "🤖 AIβ"]
+        ["📅 日報","🛠️ 設備","📈 月報","📄 ドキュメント","📥 取込","🤖 AIβ"]
     )
 
-    # ===== 取込 =========================================================
+    # ================= 取込（そのまま中身は流用してください） ================
     with tab5:
         st.subheader("CSV 取込")
         st.caption("推奨順序：①マスタ → ②年間業務計画 → ③operation_tickets → ④issues → ⑤点検結果 → KPI再計算")
-
-        f_master = st.file_uploader("マスタ（階層+設備+target）CSV", type=["csv"], key="upl_master")
-        if f_master:
-            import_master(pd.read_csv(f_master, encoding="utf-8-sig"))
+        f_master  = st.file_uploader("マスタ（階層+設備+target）CSV", type=["csv"], key="upl_master")
+        if f_master:  import_master(pd.read_csv(f_master, encoding="utf-8-sig"))
 
         f_plan = st.file_uploader("年間業務計画.csv（スケジュール定義/予定日）", type=["csv"], key="upl_plan")
-        if f_plan:
-            import_annual_plan(pd.read_csv(f_plan, encoding="utf-8-sig"))
+        if f_plan:    import_annual_plan(pd.read_csv(f_plan, encoding="utf-8-sig"))
 
         f_tickets = st.file_uploader("operation_tickets.csv（実施日/進捗：schedule自動解決可）", type=["csv"], key="upl_tickets")
-        if f_tickets:
-            import_tickets(pd.read_csv(f_tickets, encoding="utf-8-sig"))
+        if f_tickets: import_tickets(pd.read_csv(f_tickets, encoding="utf-8-sig"))
 
         f_issues = st.file_uploader("issues.csv（不具合）", type=["csv"], key="upl_issues")
-        if f_issues:
-            import_issues(pd.read_csv(f_issues, encoding="utf-8-sig"))
+        if f_issues:  import_issues(pd.read_csv(f_issues, encoding="utf-8-sig"))
 
         f_results = st.file_uploader("点検結果（横持ち）CSV", type=["csv"], key="upl_results")
-        if f_results:
-            import_results_wide(pd.read_csv(f_results, encoding="utf-8-sig"))
+        if f_results: import_results_wide(pd.read_csv(f_results, encoding="utf-8-sig"))
 
-        if st.button("KPI再計算"):
-            recalc_daily_kpis()
-            st.success("daily_kpis 再計算")
+        if st.button("KPI再計算"): recalc_daily_kpis(); st.success("daily_kpis 再計算")
 
-    # ===== 日報 =========================================================
-   with tab1:
-    st.subheader("本日の業務予定と進捗")
-    target_date = st.date_input("対象日", value=date.today())
+    # ================= 日報（業務名 JOIN 版） =================
+    with tab1:
+        st.subheader("本日の業務予定と進捗")
+        target_date = st.date_input("対象日", value=date.today())
 
-    # 業務名を JOIN
-    q = """
-    SELECT
-        sd.schedule_id,
-        COALESCE(s.name, CAST(sd.schedule_id AS VARCHAR)) AS job_name,
-        sd.date, sd.status, sd.done, sd.total, sd.done_at
-    FROM schedule_dates sd
-    LEFT JOIN schedules s
-      ON s.tenant = sd.tenant AND s.id = sd.schedule_id
-    WHERE sd.tenant = ? AND sd.date = ?
-    ORDER BY job_name
-    """
-    df = con.execute(q, [TENANT, target_date]).df()
+        q = """
+        SELECT
+            sd.schedule_id,
+            COALESCE(s.name, CAST(sd.schedule_id AS VARCHAR)) AS job_name,
+            sd.date, sd.status, sd.done, sd.total, sd.done_at
+        FROM schedule_dates sd
+        LEFT JOIN schedules s
+          ON s.tenant = sd.tenant AND s.id = sd.schedule_id
+        WHERE sd.tenant = ? AND sd.date = ?
+        ORDER BY job_name
+        """
+        df = con.execute(q, [TENANT, target_date]).df()
 
-    # KPIは生計算（daily_kpis に依存しない）
-    planned = int(df.shape[0])
-    done = int(df["status"].isin(["完了","実施済"]).sum()) if not df.empty else 0
-    overdue = 0  # 当日ページなので 0 にする。必要ならロジックを入れてください。
+        planned = int(df.shape[0])
+        done    = int(df["status"].isin(["完了","実施済"]).sum()) if not df.empty else 0
+        overdue = 0  # 当日ページなので0。必要ならロジック追加
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("予定", planned)
-    c2.metric("完了", done)
-    c3.metric("期限超過", overdue)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("予定", planned); c2.metric("完了", done); c3.metric("期限超過", overdue)
 
-    # 表示整形
-    if df.empty:
-        st.info("対象日のデータがありません。")
-    else:
-        view = df.rename(columns={
-            "schedule_id": "スケジュールID",
-            "job_name": "業務名",
-            "status": "ステータス",
-            "done": "完了",
-            "total": "総数",
-            "done_at": "完了日時"
-        })
-        st.dataframe(
-            view[["スケジュールID","業務名","ステータス","完了","総数","完了日時"]],
-            use_container_width=True
-        )
+        if df.empty:
+            st.info("対象日のデータがありません。")
+        else:
+            view = df.rename(columns={
+                "schedule_id":"スケジュールID","job_name":"業務名","status":"ステータス",
+                "done":"完了","total":"総数","done_at":"完了日時"
+            })
+            st.dataframe(view[["スケジュールID","業務名","ステータス","完了","総数","完了日時"]],
+                         use_container_width=True)
 
-    st.subheader("本日発生の不具合")
-    issues = con.execute(
-        "SELECT * FROM issues WHERE tenant=? AND reported_on=?",
-        [TENANT, target_date]
-    ).df()
-    st.dataframe(issues, use_container_width=True)
+        st.subheader("本日発生の不具合")
+        issues = con.execute(
+            "SELECT * FROM issues WHERE tenant=? AND reported_on=?",
+            [TENANT, target_date]
+        ).df()
+        st.dataframe(issues, use_container_width=True)
+
+    # ============ 以降、既存の tab2/tab3/tab4/tab6 をこの関数の中に続けて書く ============
+    # with tab2: ...（設備）
+    # with tab3: ...（月報）
+    # with tab4: ...（ドキュメント）
+    # with tab6: ...（AI）
+
 
 
     # ===== 設備 =========================================================
